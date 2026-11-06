@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/dbnamespace"
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/dbnamespace"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v3"
 )
 
 const (
@@ -40,32 +40,32 @@ const (
 // the height of the best chain on start up.
 //
 // There are 5 buckets from the database reserved for tickets. These are:
-// 1. Live
+// 1. Live:
 //     Live ticket bucket, for tickets currently in the lottery
 //
 //     k: ticket hash
 //     v: height
 //
-// 2. Missed
+// 2. Missed:
 //     Missed tickets bucket, for all tickets that are missed.
 //
 //     k: ticket hash
 //     v: height
 //
-// 3. Revoked
+// 3. Revoked:
 //     Revoked tickets bucket, for all tickets that are Revoked.
 //
 //     k: ticket hash
 //     v: height
 //
-// 4. BlockUndo
-//     Block removal data, for reverting the the first 3 database buckets to
+// 4. BlockUndo:
+//     Block removal data, for reverting the first 3 database buckets to
 //     a previous state.
 //
 //     k: height
 //     v: serialized undo ticket data
 //
-// 5. TicketsToAdd
+// 5. TicketsToAdd:
 //     Tickets to add bucket, which tells which tickets will be maturing and
 //     entering the (1) in the event that a block at that height is added.
 //
@@ -136,8 +136,8 @@ const databaseInfoSize = 8
 
 // DatabaseInfo is the structure for a database.
 type DatabaseInfo struct {
-	Version        uint32
 	Date           time.Time
+	Version        uint32
 	UpgradeStarted bool
 }
 
@@ -167,7 +167,7 @@ func DbPutDatabaseInfo(dbTx database.Tx, dbi *DatabaseInfo) error {
 	val := serializeDatabaseInfo(dbi)
 
 	// Store the current database info into the database.
-	return subsidyBucket.Put(dbnamespace.StakeDbInfoBucketName, val[:])
+	return subsidyBucket.Put(dbnamespace.StakeDbInfoBucketName, val)
 }
 
 // deserializeDatabaseInfo deserializes a database information struct.
@@ -244,13 +244,21 @@ type BestChainState struct {
 }
 
 // serializeBestChainState returns the serialization of the passed block best
-// chain state.  This is data to be stored in the chain state bucket. This
-// function will panic if the number of tickets per block is less than the
+// chain state.  This is data to be stored in the chain state bucket.
+// This function will panic if the number of tickets per block is less than the
 // size of next winners, which should never happen unless there is memory
 // corruption.
 func serializeBestChainState(state BestChainState) []byte {
+	if int(state.PerBlock) < len(state.NextWinners) {
+		str := fmt.Sprintf("PerBlock:%d < NextWinners:%d",
+			state.PerBlock, len(state.NextWinners))
+		panic(str)
+	}
+
+	serializedDataLen := minimumBestChainStateSize +
+		(chainhash.HashSize * int(state.PerBlock))
 	// Serialize the chain state.
-	serializedData := make([]byte, minimumBestChainStateSize)
+	serializedData := make([]byte, serializedDataLen)
 
 	offset := 0
 	copy(serializedData[offset:offset+chainhash.HashSize], state.Hash[:])
@@ -267,15 +275,13 @@ func serializeBestChainState(state BestChainState) []byte {
 	offset += 2
 
 	// Serialize the next winners.
-	ticketBuffer := make([]byte, chainhash.HashSize*int(state.PerBlock))
-	serializedData = append(serializedData, ticketBuffer...)
 	for i := range state.NextWinners {
 		copy(serializedData[offset:offset+chainhash.HashSize],
 			state.NextWinners[i][:])
 		offset += chainhash.HashSize
 	}
 
-	return serializedData[:]
+	return serializedData
 }
 
 // deserializeBestChainState deserializes the passed serialized best chain
@@ -348,17 +354,17 @@ func DbPutBestState(dbTx database.Tx, bcs BestChainState) error {
 // The last 3 are encoded as a single byte of flags.
 // The flags describe a particular state for the ticket:
 //  1. Missed is set, but revoked and spent are not (0000 0001). The ticket
-//      was selected in the lottery at this block height but missed, or the
-//      ticket became too old and was missed. The ticket is being moved to the
-//      missed ticket bucket from the live ticket bucket.
+//     was selected in the lottery at this block height but missed, or the
+//     ticket became too old and was missed. The ticket is being moved to the
+//     missed ticket bucket from the live ticket bucket.
 //  2. Missed and revoked are set (0000 0011). The ticket was missed
-//      previously at a block before this one and was revoked, and
-//      as such is being moved to the revoked ticket bucket from the
-//      missed ticket bucket.
+//     previously at a block before this one and was revoked, and
+//     as such is being moved to the revoked ticket bucket from the
+//     missed ticket bucket.
 //  3. Spent is set (0000 0100). The ticket has been spent and is removed
-//      from the live ticket bucket.
+//     from the live ticket bucket.
 //  4. No flags are set. The ticket was newly added to the live ticket
-//      bucket this block as a maturing ticket.
+//     bucket this block as a maturing ticket.
 type UndoTicketData struct {
 	TicketHash   chainhash.Hash
 	TicketHeight uint32
@@ -492,7 +498,7 @@ func DbPutBlockUndoData(dbTx database.Tx, height uint32, utds []UndoTicketData) 
 	dbnamespace.ByteOrder.PutUint32(k, height)
 	v := serializeBlockUndoData(utds)
 
-	return bucket.Put(k[:], v[:])
+	return bucket.Put(k, v)
 }
 
 // DbDropBlockUndoData drops block undo data from the database at a given height.
@@ -582,7 +588,7 @@ func DbPutNewTickets(dbTx database.Tx, height uint32, ths TicketHashes) error {
 	dbnamespace.ByteOrder.PutUint32(k, height)
 	v := serializeTicketHashes(ths)
 
-	return bucket.Put(k[:], v[:])
+	return bucket.Put(k, v)
 }
 
 // DbDropNewTickets drops new tickets for a mainchain block data at some height.
@@ -622,7 +628,7 @@ func DbPutTicket(dbTx database.Tx, ticketBucket []byte, hash *chainhash.Hash,
 	dbnamespace.ByteOrder.PutUint32(v, height)
 	v[4] = undoBitFlagsToByte(missed, revoked, spent, expired)
 
-	return bucket.Put(k[:], v[:])
+	return bucket.Put(k, v)
 }
 
 // DbLoadAllTickets loads all the live tickets from the database into a treap.
@@ -660,6 +666,32 @@ func DbLoadAllTickets(dbTx database.Tx, ticketBucket []byte) (*tickettreap.Immut
 	}
 
 	return treap, nil
+}
+
+// DbRemoveAllBuckets removes all buckets from the database.
+func DbRemoveAllBuckets(dbTx database.Tx) error {
+	meta := dbTx.Metadata()
+	err := meta.DeleteBucket(dbnamespace.StakeDbInfoBucketName)
+	if err != nil {
+		return err
+	}
+	err = meta.DeleteBucket(dbnamespace.LiveTicketsBucketName)
+	if err != nil {
+		return err
+	}
+	err = meta.DeleteBucket(dbnamespace.MissedTicketsBucketName)
+	if err != nil {
+		return err
+	}
+	err = meta.DeleteBucket(dbnamespace.RevokedTicketsBucketName)
+	if err != nil {
+		return err
+	}
+	err = meta.DeleteBucket(dbnamespace.StakeBlockUndoDataBucketName)
+	if err != nil {
+		return err
+	}
+	return meta.DeleteBucket(dbnamespace.TicketsInBlockBucketName)
 }
 
 // DbCreate initializes all the buckets required for the database and stores

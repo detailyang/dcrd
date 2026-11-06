@@ -1,51 +1,42 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package dcrjson_test
+package dcrjson
 
 import (
+	"errors"
+	"io"
 	"testing"
-
-	"github.com/decred/dcrd/dcrjson"
 )
 
-// TestErrorCodeStringer tests the stringized output for the ErrorCode type.
-func TestErrorCodeStringer(t *testing.T) {
+// TestErrorKindStringer tests the stringized output for the ErrorKind type.
+func TestErrorKindStringer(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		in   dcrjson.ErrorCode
+		in   ErrorKind
 		want string
 	}{
-		{dcrjson.ErrDuplicateMethod, "ErrDuplicateMethod"},
-		{dcrjson.ErrInvalidUsageFlags, "ErrInvalidUsageFlags"},
-		{dcrjson.ErrInvalidType, "ErrInvalidType"},
-		{dcrjson.ErrEmbeddedType, "ErrEmbeddedType"},
-		{dcrjson.ErrUnexportedField, "ErrUnexportedField"},
-		{dcrjson.ErrUnsupportedFieldType, "ErrUnsupportedFieldType"},
-		{dcrjson.ErrNonOptionalField, "ErrNonOptionalField"},
-		{dcrjson.ErrNonOptionalDefault, "ErrNonOptionalDefault"},
-		{dcrjson.ErrMismatchedDefault, "ErrMismatchedDefault"},
-		{dcrjson.ErrUnregisteredMethod, "ErrUnregisteredMethod"},
-		{dcrjson.ErrNumParams, "ErrNumParams"},
-		{dcrjson.ErrMissingDescription, "ErrMissingDescription"},
-		{0xffff, "Unknown ErrorCode (65535)"},
+		{ErrDuplicateMethod, "ErrDuplicateMethod"},
+		{ErrInvalidUsageFlags, "ErrInvalidUsageFlags"},
+		{ErrInvalidType, "ErrInvalidType"},
+		{ErrEmbeddedType, "ErrEmbeddedType"},
+		{ErrUnexportedField, "ErrUnexportedField"},
+		{ErrUnsupportedFieldType, "ErrUnsupportedFieldType"},
+		{ErrNonOptionalField, "ErrNonOptionalField"},
+		{ErrNonOptionalDefault, "ErrNonOptionalDefault"},
+		{ErrMismatchedDefault, "ErrMismatchedDefault"},
+		{ErrUnregisteredMethod, "ErrUnregisteredMethod"},
+		{ErrNumParams, "ErrNumParams"},
+		{ErrMissingDescription, "ErrMissingDescription"},
 	}
 
-	// Detect additional error codes that don't have the stringer added.
-	if len(tests)-1 != int(dcrjson.TstNumErrorCodes) {
-		t.Errorf("It appears an error code was added without adding an " +
-			"associated stringer test")
-	}
-
-	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		result := test.in.String()
+		result := test.in.Error()
 		if result != test.want {
-			t.Errorf("String #%d\n got: %s want: %s", i, result,
-				test.want)
+			t.Errorf("%d: got: %s want: %s", i, result, test.want)
 			continue
 		}
 	}
@@ -56,18 +47,15 @@ func TestError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		in   dcrjson.Error
+		in   Error
 		want string
-	}{
-		{
-			dcrjson.Error{Message: "some error"},
-			"some error",
-		},
-		{
-			dcrjson.Error{Message: "human-readable error"},
-			"human-readable error",
-		},
-	}
+	}{{
+		Error{Description: "some error"},
+		"some error",
+	}, {
+		Error{Description: "human-readable error"},
+		"human-readable error",
+	}}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
@@ -75,6 +63,88 @@ func TestError(t *testing.T) {
 		if result != test.want {
 			t.Errorf("Error #%d\n got: %s want: %s", i, result,
 				test.want)
+			continue
+		}
+	}
+}
+
+// TestErrorKindIsAs ensures both ErrorKind and Error can be identified as being
+// a specific error kind via errors.Is and unwrapped via errors.As.
+func TestErrorKindIsAs(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		target    error
+		wantMatch bool
+		wantAs    ErrorKind
+	}{{
+		name:      "ErrDuplicateMethod == ErrDuplicateMethod",
+		err:       ErrDuplicateMethod,
+		target:    ErrDuplicateMethod,
+		wantMatch: true,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "Error.ErrDuplicateMethod == ErrDuplicateMethod",
+		err:       makeError(ErrDuplicateMethod, ""),
+		target:    ErrDuplicateMethod,
+		wantMatch: true,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "Error.ErrDuplicateMethod == Error.ErrDuplicateMethod",
+		err:       makeError(ErrDuplicateMethod, ""),
+		target:    makeError(ErrDuplicateMethod, ""),
+		wantMatch: true,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "ErrDuplicateMethod != ErrInvalidType",
+		err:       ErrDuplicateMethod,
+		target:    ErrInvalidType,
+		wantMatch: false,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "Error.ErrDuplicateMethod != ErrInvalidType",
+		err:       makeError(ErrDuplicateMethod, ""),
+		target:    ErrInvalidType,
+		wantMatch: false,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "ErrDuplicateMethod != Error.ErrInvalidType",
+		err:       ErrDuplicateMethod,
+		target:    makeError(ErrInvalidType, ""),
+		wantMatch: false,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "Error.ErrDuplicateMethod != Error.ErrInvalidType",
+		err:       makeError(ErrDuplicateMethod, ""),
+		target:    makeError(ErrInvalidType, ""),
+		wantMatch: false,
+		wantAs:    ErrDuplicateMethod,
+	}, {
+		name:      "Error.ErrUnregisteredMethod != io.EOF",
+		err:       makeError(ErrUnregisteredMethod, ""),
+		target:    io.EOF,
+		wantMatch: false,
+		wantAs:    ErrUnregisteredMethod,
+	}}
+	for _, test := range tests {
+		// Ensure the error matches or not depending on the expected result.
+		result := errors.Is(test.err, test.target)
+		if result != test.wantMatch {
+			t.Errorf("%s: incorrect error identification -- got %v, want %v",
+				test.name, result, test.wantMatch)
+			continue
+		}
+
+		// Ensure the underlying error kind can be unwrapped and is the
+		// expected kind.
+		var kind ErrorKind
+		if !errors.As(test.err, &kind) {
+			t.Errorf("%s: unable to unwrap to error kind", test.name)
+			continue
+		}
+		if kind != test.wantAs {
+			t.Errorf("%s: unexpected unwrapped error kind -- got %v, want %v",
+				test.name, kind, test.wantAs)
 			continue
 		}
 	}

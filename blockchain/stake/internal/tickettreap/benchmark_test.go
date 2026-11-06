@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -15,7 +15,7 @@ const numTicketKeys = 42500
 
 var (
 	// generatedTicketKeys is used to store ticket keys generated for use
-	// in the benchmarks so that they only need to be generatd once for all
+	// in the benchmarks so that they only need to be generated once for all
 	// benchmarks that use them.
 	genTicketKeysLock   sync.Mutex
 	generatedTicketKeys []Key
@@ -87,5 +87,4 @@ func BenchmarkImmutableIterate(b *testing.B) {
 			return true
 		})
 	}
-
 }

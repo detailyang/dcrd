@@ -1,5 +1,5 @@
 // Copyright (c) 2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2019-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -33,6 +33,13 @@ func TestSendHeaders(t *testing.T) {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Test encode with latest protocol version.
@@ -69,8 +76,6 @@ func TestSendHeaders(t *testing.T) {
 			"version %v err <%v>"
 		t.Errorf(s, msg, err)
 	}
-
-	return
 }
 
 // TestSendHeadersBIP0130 tests the MsgSendHeaders API against the protocol
@@ -96,8 +101,6 @@ func TestSendHeadersBIP0130(t *testing.T) {
 		t.Errorf("decode of MsgSendHeaders succeeded when it should " +
 			"have failed")
 	}
-
-	return
 }
 
 // TestSendHeadersCrossProtocol tests the MsgSendHeaders API when encoding with
@@ -126,7 +129,7 @@ func TestSendHeadersCrossProtocol(t *testing.T) {
 // various protocol versions.
 func TestSendHeadersWire(t *testing.T) {
 	msgSendHeaders := NewMsgSendHeaders()
-	msgSendHeadersEncoded := []byte{}
+	var msgSendHeadersEncoded []byte
 
 	tests := []struct {
 		in   *MsgSendHeaders // Message to encode
@@ -172,6 +175,14 @@ func TestSendHeadersWire(t *testing.T) {
 			t.Errorf("BtcEncode #%d\n got: %s want: %s", i,
 				spew.Sdump(buf.Bytes()), spew.Sdump(test.buf))
 			continue
+		}
+
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.in.SerializeSize()
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
 		}
 
 		// Decode the message from wire format.

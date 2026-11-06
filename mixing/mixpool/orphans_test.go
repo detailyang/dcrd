@@ -1,0 +1,290 @@
+// Copyright (c) 2024-2026 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package mixpool
+
+import (
+	"errors"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/crypto/blake256"
+	"github.com/decred/dcrd/mixing"
+	"github.com/decred/dcrd/wire"
+)
+
+var (
+	testStartingHeight uint32 = 100
+	testStartingBlock         = chainhash.Hash{100}
+)
+
+var testnetParams = chaincfg.TestNet3Params()
+
+type testBlockchain struct{}
+
+func newTestBlockchain() *testBlockchain {
+	return &testBlockchain{}
+}
+
+func (b *testBlockchain) CurrentTip() (chainhash.Hash, int64) {
+	return testStartingBlock, int64(testStartingHeight)
+}
+
+func (b *testBlockchain) ChainParams() *chaincfg.Params {
+	return testnetParams
+}
+
+// Intentionally create orphans and test their acceptance behavior when PRs
+// and KEs are accepted.
+func TestOrphans(t *testing.T) {
+	pub, priv, err := generateSecp256k1(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := *(*[33]byte)(pub.SerializeCompressed())
+
+	h := blake256.NewHasher256()
+
+	pr := &wire.MsgMixPairReq{
+		Identity: id,
+		UTXOs: []wire.MixPairReqUTXO{
+			{},
+		},
+		MessageCount: 1,
+		MixAmount:    1 << 18,
+		Expiry:       testStartingHeight + 10,
+		ScriptClass:  string(mixing.ScriptClassP2PKHv0),
+		InputValue:   1<<18 + 3000,
+	}
+	err = mixing.SignMessage(pr, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.WriteHash(h)
+
+	prs := []*wire.MsgMixPairReq{pr}
+	epoch := uint64(time.Now().Truncate(time.Minute).Unix())
+	sid := mixing.SortPRsForSession(prs, epoch)
+	ke := &wire.MsgMixKeyExchange{
+		Identity: id,
+		SeenPRs: []chainhash.Hash{
+			pr.Hash(),
+		},
+		SessionID: sid,
+		Epoch:     epoch,
+		Run:       0,
+	}
+	err = mixing.SignMessage(ke, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ke.WriteHash(h)
+
+	fp := &wire.MsgMixFactoredPoly{
+		Identity:  id,
+		SessionID: sid,
+		Run:       0,
+	}
+	err = mixing.SignMessage(fp, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.WriteHash(h)
+
+	t.Logf("pr %s", pr.Hash())
+	t.Logf("ke %s", ke.Hash())
+	t.Logf("fp %s", fp.Hash())
+
+	// Create a pair request, KE, and later messages that belong to the
+	// session for each KE.  Test different combinations of acceptance
+	// order to test orphan processing of various message types.
+	type accept struct {
+		desc     string
+		message  mixing.Message
+		errors   bool
+		errAs    interface{}
+		accepted []mixing.Message
+	}
+	tests := [][]accept{
+		// Accept KE, then PR, then FP
+		0: {{
+			desc:     "accept KE before PR",
+			message:  ke,
+			errors:   true,
+			errAs:    new(MissingOwnPRError),
+			accepted: nil,
+		}, {
+			desc:     "accept PR after KE; both should now process",
+			message:  pr,
+			errors:   false,
+			accepted: []mixing.Message{pr, ke},
+		}, {
+			desc:     "accept future message in accepted KE session/run",
+			message:  fp,
+			errors:   false, // maybe later.
+			accepted: []mixing.Message{fp},
+		}},
+
+		// Accept FP, then KE, then PR
+		1: {{
+			desc:     "accept FP first",
+			message:  fp,
+			errors:   false,
+			accepted: nil,
+		}, {
+			desc:     "accept KE",
+			message:  ke,
+			errors:   true,
+			errAs:    new(MissingOwnPRError),
+			accepted: nil,
+		}, {
+			desc:     "accept PR; all should now be processed",
+			message:  pr,
+			errors:   false,
+			accepted: []mixing.Message{pr, ke, fp},
+		}},
+	}
+
+	for i, accepts := range tests {
+		t.Logf("test %d", i)
+		mp := NewPool(newTestBlockchain())
+
+		for j, a := range accepts {
+			accepted, err := mp.AcceptMessage(a.message, ZeroSource)
+			if err != nil != a.errors {
+				t.Errorf("test %d call %d %q: unexpected error: %v", i, j, a.desc, err)
+			}
+			if a.errors && !errors.As(err, &a.errAs) {
+				t.Errorf("test %d call %d %q: unexpected error: %v", i, j, a.desc, err)
+			}
+			if len(accepted) != len(a.accepted) {
+				t.Logf("orphans: %v", mp.orphans)
+				t.Logf("orphansByID: %v", mp.orphansByID)
+				t.Logf("pr: %v", pr)
+				t.Errorf("test %d call %d %q: accepted lengths differ %d != %d", i, j, a.desc,
+					len(accepted), len(a.accepted))
+			}
+			if !reflect.DeepEqual(accepted, a.accepted) {
+				t.Errorf("test %d call %d %q: accepted messages differs: %#v", i, j, a.desc, accepted)
+			}
+		}
+	}
+}
+
+// TestOrphanEviction ensures that exceeding the maximum number of orphans
+// evicts entries to make room for the new ones.
+func TestOrphanEviction(t *testing.T) {
+	pub, priv, err := generateSecp256k1(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := *(*[33]byte)(pub.SerializeCompressed())
+
+	// createOrphanKEAndCT returns a signed mix key exchange and cyphertexts
+	// message associated with a unique pair request.
+	h := blake256.NewHasher256()
+	var nextPRNum uint32
+	createOrphanKEAndCT := func() (*wire.MsgMixKeyExchange, *wire.MsgMixCiphertexts) {
+		h.Reset()
+		h.WriteUint32LE(nextPRNum)
+		nextPRNum++
+		randPrevOut := wire.OutPoint{Hash: h.Sum256()}
+		randomUTXO := wire.MixPairReqUTXO{OutPoint: randPrevOut}
+		pr := &wire.MsgMixPairReq{
+			Identity:     id,
+			UTXOs:        []wire.MixPairReqUTXO{randomUTXO},
+			MessageCount: 1,
+			Expiry:       testStartingHeight + 10,
+			ScriptClass:  string(mixing.ScriptClassP2PKHv0),
+			InputValue:   1 << 18,
+		}
+		err = mixing.SignMessage(pr, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pr.WriteHash(h)
+
+		prs := []*wire.MsgMixPairReq{pr}
+		epoch := uint64(time.Now().Truncate(time.Minute).Unix())
+		sid := mixing.SortPRsForSession(prs, epoch)
+		ke := &wire.MsgMixKeyExchange{
+			Identity:  id,
+			SessionID: sid,
+			Epoch:     epoch,
+			Run:       0,
+			SeenPRs: []chainhash.Hash{
+				pr.Hash(),
+			},
+		}
+		err = mixing.SignMessage(ke, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ke.WriteHash(h)
+
+		seenKEs := []chainhash.Hash{ke.Hash()}
+		ct := &wire.MsgMixCiphertexts{
+			Identity:         id,
+			SessionID:        sid,
+			Run:              0,
+			SeenKeyExchanges: seenKEs,
+		}
+		err = mixing.SignMessage(ct, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ct.WriteHash(h)
+
+		return ke, ct
+	}
+
+	// Create enough orphan key exchange and cyphertext messages to be able to
+	// exceed the maximum number of orphans allowed in the pool.
+	orphans := make([]mixing.Message, 0, maxOrphans+2)
+	for range maxOrphans/2 + 1 {
+		ke, ct := createOrphanKEAndCT()
+		orphans = append(orphans, ke, ct)
+	}
+
+	// Fill up the orphan pool to the max allowed with orphan messages while
+	// also pretending as though the orphans came from different sources.
+	p := NewPool(newTestBlockchain())
+	acceptOrphanAndCheck := func(msg mixing.Message, srcID uint64) {
+		accepted, err := p.AcceptMessage(msg, Uint64Source(srcID))
+		if len(accepted) != 0 {
+			t.Fatalf("accepted orphan message %T to main pool", msg)
+		}
+		if _, ok := msg.(*wire.MsgMixKeyExchange); ok {
+			var ownPRErr *MissingOwnPRError
+			if !errors.As(err, &ownPRErr) {
+				t.Fatalf("unexpected error for orphan message: %v", err)
+			}
+		}
+	}
+	const numSources = 5
+	numOrphansPerSource := (maxOrphans + 1 + (numSources - 1)) / numSources
+	for i := range maxOrphans {
+		orphan := orphans[i]
+		srcID := uint64(i/numOrphansPerSource) + 1
+		acceptOrphanAndCheck(orphan, srcID)
+	}
+
+	// Ensure the orphan pool is the max allowed.
+	assertOrphanPoolSize := func(expected int) {
+		if len(p.orphans) != expected {
+			t.Fatalf("unexpected orphan pool size - got %d, want %d",
+				len(p.orphans), expected)
+		}
+	}
+	assertOrphanPoolSize(maxOrphans)
+
+	// Ensure adding another orphan causes evictions of orphans tagged from
+	// the sources that submitted the most until the pool only retains the
+	// target number post eviction plus one for the orphan being added.
+	acceptOrphanAndCheck(orphans[maxOrphans], numSources)
+	assertOrphanPoolSize(maxPostEvictionOrphans + 1)
+}

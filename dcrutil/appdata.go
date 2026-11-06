@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,7 +7,6 @@ package dcrutil
 
 import (
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,25 +25,16 @@ func appDataDir(goos, appName string, roaming bool) string {
 
 	// The caller really shouldn't prepend the appName with a period, but
 	// if they do, handle it gracefully by stripping it.
-	if strings.HasPrefix(appName, ".") {
-		appName = appName[1:]
-	}
+	appName = strings.TrimPrefix(appName, ".")
 	appNameUpper := string(unicode.ToUpper(rune(appName[0]))) + appName[1:]
 	appNameLower := string(unicode.ToLower(rune(appName[0]))) + appName[1:]
 
 	// Get the OS specific home directory via the Go standard lib.
-	var homeDir string
-	usr, err := user.Current()
-	if err == nil {
-		homeDir = usr.HomeDir
-	}
-
-	// Fall back to standard HOME environment variable that works
-	// for most POSIX OSes if the directory from the Go standard
-	// lib failed.
-	if err != nil || homeDir == "" {
-		homeDir = os.Getenv("HOME")
-	}
+	//
+	// Note that the error is intentionally ignored here since an empty string
+	// for the home directory will be returned in the case of error which is the
+	// desired behavior.
+	homeDir, _ := os.UserHomeDir()
 
 	switch goos {
 	// Attempt to use the LOCALAPPDATA or APPDATA environment variable on
@@ -98,11 +88,12 @@ func appDataDir(goos, appName string, roaming bool) string {
 // (%LOCALAPPDATA%) that is used by default.
 //
 // Example results:
-//  dir := AppDataDir("myapp", false)
-//   POSIX (Linux/BSD): ~/.myapp
-//   Mac OS: $HOME/Library/Application Support/Myapp
-//   Windows: %LOCALAPPDATA%\Myapp
-//   Plan 9: $home/myapp
+//
+//	dir := AppDataDir("myapp", false)
+//	 POSIX (Linux/BSD): ~/.myapp
+//	 Mac OS: $HOME/Library/Application Support/Myapp
+//	 Windows: %LOCALAPPDATA%\Myapp
+//	 Plan 9: $home/myapp
 func AppDataDir(appName string, roaming bool) string {
 	return appDataDir(runtime.GOOS, appName, roaming)
 }

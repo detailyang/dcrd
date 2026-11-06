@@ -1,23 +1,26 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/indexers"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/internal/blockchain"
+	"github.com/decred/dcrd/internal/blockchain/indexers"
 	"github.com/decred/dcrd/wire"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 var zeroHash = chainhash.Hash{}
@@ -49,6 +52,10 @@ type blockImporter struct {
 	lastBlockTime     time.Time
 	lastLogTime       time.Time
 	startTime         time.Time
+
+	txIndex         *indexers.TxIndex
+	existsAddrIndex *indexers.ExistsAddrIndex
+	cancel          context.CancelFunc
 }
 
 // readBlock reads the next block from the input file.
@@ -58,7 +65,7 @@ func (bi *blockImporter) readBlock() ([]byte, error) {
 	var net uint32
 	err := binary.Read(bi.r, binary.LittleEndian, &net)
 	if err != nil {
-		if err != io.EOF {
+		if !errors.Is(err, io.EOF) {
 			return nil, err
 		}
 
@@ -108,22 +115,14 @@ func (bi *blockImporter) processBlock(serializedBlock []byte) (bool, error) {
 
 	// Skip blocks that already exist.
 	blockHash := block.Hash()
-	exists, err := bi.chain.HaveBlock(blockHash)
-	if err != nil {
-		return false, err
-	}
-	if exists {
+	if bi.chain.HaveBlock(blockHash) {
 		return false, nil
 	}
 
 	// Don't bother trying to process orphans.
 	prevHash := &block.MsgBlock().Header.PrevBlock
 	if !prevHash.IsEqual(&zeroHash) {
-		exists, err := bi.chain.HaveBlock(prevHash)
-		if err != nil {
-			return false, err
-		}
-		if !exists {
+		if !bi.chain.HaveBlock(prevHash) {
 			return false, fmt.Errorf("import file contains block "+
 				"%v which does not link to the available "+
 				"block chain", prevHash)
@@ -132,18 +131,19 @@ func (bi *blockImporter) processBlock(serializedBlock []byte) (bool, error) {
 
 	// Ensure the blocks follows all of the chain rules and match up to the
 	// known checkpoints.
-	isMainChain, isOrphan, err := bi.chain.ProcessBlock(block,
-		blockchain.BFFastAdd)
+	forkLen, err := bi.chain.ProcessBlock(block)
 	if err != nil {
+		if errors.Is(err, blockchain.ErrMissingParent) {
+			return false, fmt.Errorf("import file contains an orphan block: %v",
+				blockHash)
+		}
+
 		return false, err
 	}
+	isMainChain := forkLen == 0
 	if !isMainChain {
-		return false, fmt.Errorf("import file contains an block that "+
+		return false, fmt.Errorf("import file contains a block that "+
 			"does not extend the main chain: %v", blockHash)
-	}
-	if isOrphan {
-		return false, fmt.Errorf("import file contains an orphan "+
-			"block: %v", blockHash)
 	}
 
 	return true, nil
@@ -159,8 +159,7 @@ out:
 		// notify the status handler with the error and bail.
 		serializedBlock, err := bi.readBlock()
 		if err != nil {
-			bi.errChan <- fmt.Errorf("error reading from input "+
-				"file: %v", err.Error())
+			bi.errChan <- fmt.Errorf("error reading from input file: %w", err)
 			break out
 		}
 
@@ -220,7 +219,7 @@ func (bi *blockImporter) logProgress() {
 // processHandler is the main handler for processing blocks.  This allows block
 // processing to take place in parallel with block reads from the import file.
 // It must be run as a goroutine.
-func (bi *blockImporter) processHandler() {
+func (bi *blockImporter) processHandler(ctx context.Context) {
 out:
 	for {
 		select {
@@ -246,6 +245,9 @@ out:
 
 		case <-bi.quit:
 			break out
+
+		case <-ctx.Done():
+			close(bi.quit)
 		}
 	}
 	bi.wg.Done()
@@ -281,12 +283,12 @@ func (bi *blockImporter) statusHandler(resultsChan chan *importResults) {
 // Import is the core function which handles importing the blocks from the file
 // associated with the block importer to the database.  It returns a channel
 // on which the results will be returned when the operation has completed.
-func (bi *blockImporter) Import() chan *importResults {
+func (bi *blockImporter) Import(ctx context.Context) chan *importResults {
 	// Start up the read and process handling goroutines.  This setup allows
 	// blocks to be read from disk in parallel while being processed.
 	bi.wg.Add(2)
 	go bi.readHandler()
-	go bi.processHandler()
+	go bi.processHandler(ctx)
 
 	// Wait for the import to finish in a separate goroutine and signal
 	// the status handler when done.
@@ -304,61 +306,73 @@ func (bi *blockImporter) Import() chan *importResults {
 
 // newBlockImporter returns a new importer for the provided file reader seeker
 // and database.
-func newBlockImporter(db database.DB, r io.ReadSeeker) (*blockImporter, error) {
-	// Create the various indexes as needed.
-	//
-	// CAUTION: the txindex needs to be first in the indexes array because
-	// the addrindex uses data from the txindex during catchup.  If the
-	// addrindex is run first, it may not have the transactions from the
-	// current block indexed.
-	var indexes []indexers.Indexer
-	if cfg.TxIndex || cfg.AddrIndex {
-		// Enable transaction index if address index is enabled since it
-		// requires it.
-		if !cfg.TxIndex {
-			log.Infof("Transaction index enabled because it is " +
-				"required by the address index")
-			cfg.TxIndex = true
-		} else {
-			log.Info("Transaction index is enabled")
-		}
-		indexes = append(indexes, indexers.NewTxIndex(db))
+func newBlockImporter(ctx context.Context, db database.DB, utxoDb *leveldb.DB, r io.ReadSeeker, cancel context.CancelFunc) (*blockImporter, error) {
+	subber := indexers.NewIndexSubscriber(ctx)
+	go subber.Run(ctx)
+
+	// Instantiate a UTXO backend and UTXO cache.
+	utxoBackend := blockchain.NewLevelDbUtxoBackend(utxoDb)
+	utxoCache := blockchain.NewUtxoCache(&blockchain.UtxoCacheConfig{
+		Backend:      utxoBackend,
+		FlushBlockDB: db.Flush,
+		MaxSize:      100 * 1024 * 1024, // 100 MiB
+	})
+
+	chain, err := blockchain.New(ctx,
+		&blockchain.Config{
+			DB:              db,
+			ChainParams:     activeNetParams,
+			TimeSource:      blockchain.NewMedianTime(),
+			IndexSubscriber: subber,
+			UtxoBackend:     blockchain.NewLevelDbUtxoBackend(utxoDb),
+			UtxoCache:       utxoCache,
+		})
+	if err != nil {
+		return nil, err
 	}
-	if cfg.AddrIndex {
-		log.Info("Address index is enabled")
-		indexes = append(indexes, indexers.NewAddrIndex(db, activeNetParams))
+
+	// Enable bulk import mode to allow several validation checks to be skipped
+	// when importing blocks.
+	chain.EnableBulkImportMode(true)
+
+	queryer := &blockchain.ChainQueryerAdapter{BlockChain: chain}
+
+	// Create the various indexes as needed.
+	var txIndex *indexers.TxIndex
+	var existsAddrIndex *indexers.ExistsAddrIndex
+	if cfg.TxIndex {
+		log.Info("Transaction index is enabled")
+
+		txIndex, err = indexers.NewTxIndex(subber, db, queryer)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !cfg.NoExistsAddrIndex {
 		log.Info("Exists address index is enabled")
-		indexes = append(indexes, indexers.NewExistsAddrIndex(db,
-			activeNetParams))
+		existsAddrIndex, err = indexers.NewExistsAddrIndex(subber, db, queryer)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager blockchain.IndexManager
-	if len(indexes) > 0 {
-		indexManager = indexers.NewManager(db, indexes, activeNetParams)
-	}
-
-	chain, err := blockchain.New(&blockchain.Config{
-		DB:           db,
-		ChainParams:  activeNetParams,
-		TimeSource:   blockchain.NewMedianTime(),
-		IndexManager: indexManager,
-	})
+	err = subber.CatchUp(ctx, db, queryer)
 	if err != nil {
 		return nil, err
 	}
 
 	return &blockImporter{
-		db:           db,
-		r:            r,
-		processQueue: make(chan []byte, 2),
-		doneChan:     make(chan bool),
-		errChan:      make(chan error),
-		quit:         make(chan struct{}),
-		chain:        chain,
-		lastLogTime:  time.Now(),
-		startTime:    time.Now(),
+		db:              db,
+		r:               r,
+		processQueue:    make(chan []byte, 2),
+		doneChan:        make(chan bool),
+		errChan:         make(chan error),
+		quit:            make(chan struct{}),
+		chain:           chain,
+		lastLogTime:     time.Now(),
+		startTime:       time.Now(),
+		txIndex:         txIndex,
+		existsAddrIndex: existsAddrIndex,
+		cancel:          cancel,
 	}, nil
 }

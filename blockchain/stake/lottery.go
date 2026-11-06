@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,18 +10,18 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 )
 
 var (
 	// seedConst is a constant derived from the hex representation of pi. It
-	// is used alonwith a caller-provided seed when initializing
+	// is used along with a caller-provided seed when initializing
 	// the deterministic lottery prng.
 	seedConst = [8]byte{0x24, 0x3F, 0x6A, 0x88, 0x85, 0xA3, 0x08, 0xD3}
 )
 
-// Hash256PRNG is a determinstic pseudorandom number generator that uses a
+// Hash256PRNG is a deterministic pseudorandom number generator that uses a
 // 256-bit secure hashing function to generate random uint32s starting from
 // an initial seed.
 type Hash256PRNG struct {
@@ -31,8 +31,25 @@ type Hash256PRNG struct {
 	lastHash chainhash.Hash // Cached last hash used
 }
 
-// NewHash256PRNG creates a pointer to a newly created hash256PRNG.
-func NewHash256PRNG(seed []byte) *Hash256PRNG {
+// CalcHash256PRNGIV calculates and returns the initialization vector for a
+// given seed.  This can be used in conjunction with the NewHash256PRNGFromIV
+// function to arrive at the same values that are produced when calling
+// NewHash256PRNG with the seed.
+func CalcHash256PRNGIV(seed []byte) chainhash.Hash {
+	buf := make([]byte, len(seed)+len(seedConst))
+	copy(buf, seed)
+	copy(buf[len(seed):], seedConst[:])
+	return chainhash.HashH(buf)
+}
+
+// NewHash256PRNGFromIV returns a deterministic pseudorandom number generator
+// that uses a 256-bit secure hashing function to generate random uint32s given
+// an initialization vector.  The CalcHash256PRNGIV can be used to calculate an
+// initialization vector for a given seed such that the generator will produce
+// the same values as if NewHash256PRNG were called with the same seed.  This
+// allows callers to cache and reuse the initialization vector for a given seed
+// to avoid recomputation.
+func NewHash256PRNGFromIV(iv chainhash.Hash) *Hash256PRNG {
 	// idx and lastHash are automatically initialized
 	// as 0.  We initialize the seed by appending a constant
 	// to it and hashing to give 32 bytes. This ensures
@@ -42,10 +59,17 @@ func NewHash256PRNG(seed []byte) *Hash256PRNG {
 	// derived from the hexadecimal representation of
 	// pi.
 	hp := new(Hash256PRNG)
-	hp.seed = chainhash.HashH(append(seed, seedConst[:]...))
+	hp.seed = iv
 	hp.lastHash = hp.seed
 	hp.idx = 0
 	return hp
+}
+
+// NewHash256PRNG returns a deterministic pseudorandom number generator that
+// uses a 256-bit secure hashing function to generate random uint32s given a
+// seed.
+func NewHash256PRNG(seed []byte) *Hash256PRNG {
+	return NewHash256PRNGFromIV(CalcHash256PRNGIV(seed))
 }
 
 // StateHash returns a hash referencing the current state the deterministic PRNG.
@@ -70,7 +94,7 @@ func (hp *Hash256PRNG) Hash256Rand() uint32 {
 
 	// 'roll over' the hash index to use and store it.
 	if hp.hashIdx > 7 {
-		idxB := make([]byte, 4, 4)
+		idxB := make([]byte, 4)
 		binary.BigEndian.PutUint32(idxB, uint32(hp.idx))
 		hp.lastHash = chainhash.HashH(append(hp.seed[:], idxB...))
 		hp.idx++
@@ -88,12 +112,12 @@ func (hp *Hash256PRNG) Hash256Rand() uint32 {
 	return r
 }
 
-// uniformRandom returns a random in the range [0 ... upperBound) while avoiding
+// UniformRandom returns a random in the range [0 ... upperBound) while avoiding
 // modulo bias, thus giving a normal distribution within the specified range.
 //
 // Ported from
 // https://github.com/conformal/clens/blob/master/src/arc4random_uniform.c
-func (hp *Hash256PRNG) uniformRandom(upperBound uint32) uint32 {
+func (hp *Hash256PRNG) UniformRandom(upperBound uint32) uint32 {
 	var r, min uint32
 	if upperBound < 2 {
 		return 0
@@ -127,24 +151,26 @@ func intInSlice(i int, sl []int) bool {
 	return false
 }
 
-// findTicketIdxs finds n many unique index numbers for a list length size.
+// findTicketIdxs finds n many unique ticket indexes from the provided live
+// tickets size.
 func findTicketIdxs(size int, n uint16, prng *Hash256PRNG) ([]int, error) {
 	if size < int(n) {
-		return nil, fmt.Errorf("list size too small: %v < %v",
-			size, n)
+		return nil, fmt.Errorf("cannot pick %d unique ticket indexes from a "+
+			"live tickets size of %d", n, size)
 	}
 
 	max := int64(0xFFFFFFFF)
 	if int64(size) > max {
-		return nil, fmt.Errorf("list size too big: %v > %v",
+		return nil, fmt.Errorf("live tickets size (%d) exceeds maximum "+
+			"allowed (%d)",
 			size, max)
 	}
 	sz := uint32(size)
 
-	var list []int
+	list := make([]int, 0, n)
 	var listLen uint16
 	for listLen < n {
-		r := int(prng.uniformRandom(sz))
+		r := int(prng.UniformRandom(sz))
 		if !intInSlice(r, list) {
 			list = append(list, r)
 			listLen++
@@ -152,11 +178,6 @@ func findTicketIdxs(size int, n uint16, prng *Hash256PRNG) ([]int, error) {
 	}
 
 	return list, nil
-}
-
-// FindTicketIdxs is the exported version of findTicketIdxs used for testing.
-func FindTicketIdxs(size int, n uint16, prng *Hash256PRNG) ([]int, error) {
-	return findTicketIdxs(size, n, prng)
 }
 
 // fetchWinners is a ticket database specific function which iterates over the

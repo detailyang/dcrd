@@ -18,6 +18,19 @@ dcrd.db
 _obj
 _test
 vendor
+.idea
+.vscode
+playground
+notes
+
+# Testing, profiling, and benchmarking artifacts
+cov.out
+*cpu.out
+*mem.out
+
+# Go 1.18 workspace
+go.work
+go.work.sum
 
 # Architecture specific extensions/prefixes
 *.[568vq]
@@ -35,8 +48,13 @@ _testmain.go
 *.exe
 dcrd
 cmd/addblock/addblock
-cmd/checkdevpremine/checkdevpremine
-cmd/dcrctl/dcrctl
 cmd/findcheckpoint/findcheckpoint
 cmd/gencerts/gencerts
 cmd/promptsecret/promptsecret
+
+# Vim
+*.sw*
+Session.vim
+
+# Python bytecode cache
+__pycache__/

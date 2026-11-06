@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/goleveldb/leveldb"
-	"github.com/btcsuite/goleveldb/leveldb/iterator"
-	"github.com/btcsuite/goleveldb/leveldb/util"
-	"github.com/decred/dcrd/database/internal/treap"
+	"github.com/decred/dcrd/database/v3/internal/treap"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/iterator"
+	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 const (
@@ -443,7 +443,7 @@ func (c *dbCache) commitTreaps(pendingKeys, pendingRemove TreapForEacher) error 
 		var innerErr error
 		pendingKeys.ForEach(func(k, v []byte) bool {
 			if dbErr := ldbTx.Put(k, v, nil); dbErr != nil {
-				str := fmt.Sprintf("failed to put key %q to "+
+				str := fmt.Sprintf("failed to put key %x to "+
 					"ldb transaction", k)
 				innerErr = convertErr(str, dbErr)
 				return false
@@ -457,7 +457,7 @@ func (c *dbCache) commitTreaps(pendingKeys, pendingRemove TreapForEacher) error 
 		pendingRemove.ForEach(func(k, v []byte) bool {
 			if dbErr := ldbTx.Delete(k, nil); dbErr != nil {
 				str := fmt.Sprintf("failed to delete "+
-					"key %q from ldb transaction",
+					"key %x from ldb transaction",
 					k)
 				innerErr = convertErr(str, dbErr)
 				return false
@@ -468,9 +468,9 @@ func (c *dbCache) commitTreaps(pendingKeys, pendingRemove TreapForEacher) error 
 	})
 }
 
-// flush flushes the database cache to persistent storage.  This involes syncing
-// the block store and replaying all transactions that have been applied to the
-// cache to the underlying database.
+// flush flushes the database cache to persistent storage.  This involves
+// syncing the block store and replaying all transactions that have been
+// applied to the cache to the underlying database.
 //
 // This function MUST be called with the database write lock held.
 func (c *dbCache) flush() error {
@@ -509,6 +509,15 @@ func (c *dbCache) flush() error {
 	c.cacheLock.Unlock()
 
 	return nil
+}
+
+// Flush flushes the database cache to persistent storage.  This involves
+// syncing the block store and replaying all transactions that have been
+// applied to the cache to the underlying database.
+//
+// This function MUST be called with the database write lock held.
+func (c *dbCache) Flush() error {
+	return c.flush()
 }
 
 // needsFlush returns whether or not the database cache needs to be flushed to

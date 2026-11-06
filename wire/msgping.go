@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,7 +9,7 @@ import (
 	"io"
 )
 
-// MsgPing implements the Message interface and represents a decred ping
+// MsgPing implements the Message interface and represents a Decred ping
 // message.
 //
 // For versions BIP0031Version and earlier, it is used primarily to confirm
@@ -26,17 +26,17 @@ type MsgPing struct {
 	Nonce uint64
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgPing) BtcDecode(r io.Reader, pver uint32) error {
 	err := readElement(r, &msg.Nonce)
 	return err
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgPing) BtcEncode(w io.Writer, pver uint32) error {
-	err := writeElement(w, msg.Nonce)
+	err := writeElement(w, &msg.Nonce)
 	return err
 }
 
@@ -57,7 +57,14 @@ func (msg *MsgPing) MaxPayloadLength(pver uint32) uint32 {
 	return plen
 }
 
-// NewMsgPing returns a new decred ping message that conforms to the Message
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgPing) SerializeSize() int {
+	// Nonce 8 bytes.
+	return 8
+}
+
+// NewMsgPing returns a new Decred ping message that conforms to the Message
 // interface.  See MsgPing for details.
 func NewMsgPing(nonce uint64) *MsgPing {
 	return &MsgPing{

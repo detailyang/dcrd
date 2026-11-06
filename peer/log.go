@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,53 +7,23 @@ package peer
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/btcsuite/btclog"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/wire"
-)
-
-const (
-	// maxRejectReasonLen is the maximum length of a sanitized reject reason
-	// that will be logged.
-	maxRejectReasonLen = 250
+	"github.com/decred/slog"
 )
 
 // log is a logger that is initialized with no output filters.  This
 // means the package will not perform any logging by default until the caller
 // requests it.
-var log btclog.Logger
-
 // The default amount of logging is none.
-func init() {
-	DisableLog()
-}
-
-// DisableLog disables all library log output.  Logging output is disabled
-// by default until UseLogger is called.
-func DisableLog() {
-	log = btclog.Disabled
-}
+var log = slog.Disabled
 
 // UseLogger uses a specified Logger to output package logging info.
-func UseLogger(logger btclog.Logger) {
+func UseLogger(logger slog.Logger) {
 	log = logger
-}
-
-// LogClosure is a closure that can be printed with %v to be used to
-// generate expensive-to-create data for a detailed log level and avoid doing
-// the work if the data isn't printed.
-type logClosure func() string
-
-func (c logClosure) String() string {
-	return c()
-}
-
-func newLogClosure(c func() string) logClosure {
-	return logClosure(c)
 }
 
 // directionString is a helper function that returns a string that represents
@@ -78,6 +48,24 @@ func formatLockTime(lockTime uint32) string {
 	return time.Unix(int64(lockTime), 0).String()
 }
 
+// invVectSummary returns a single inventory vector as a human-readable string.
+func invVectSummary(iv *wire.InvVect) string {
+	switch iv.Type {
+	case wire.InvTypeError:
+		return fmt.Sprintf("error %s", iv.Hash)
+	case wire.InvTypeBlock:
+		return fmt.Sprintf("block %s", iv.Hash)
+	case wire.InvTypeTx:
+		return fmt.Sprintf("tx %s", iv.Hash)
+	case wire.InvTypeFilteredBlock:
+		return fmt.Sprintf("filtered block %s", iv.Hash)
+	case wire.InvTypeMix:
+		return fmt.Sprintf("mix message %s", iv.Hash)
+	}
+
+	return fmt.Sprintf("unknown (%d) %s", uint32(iv.Type), iv.Hash)
+}
+
 // invSummary returns an inventory message as a human-readable string.
 func invSummary(invList []*wire.InvVect) string {
 	// No inventory.
@@ -88,21 +76,25 @@ func invSummary(invList []*wire.InvVect) string {
 
 	// One inventory item.
 	if invLen == 1 {
-		iv := invList[0]
-		switch iv.Type {
-		case wire.InvTypeError:
-			return fmt.Sprintf("error %s", iv.Hash)
-		case wire.InvTypeBlock:
-			return fmt.Sprintf("block %s", iv.Hash)
-		case wire.InvTypeTx:
-			return fmt.Sprintf("tx %s", iv.Hash)
-		}
-
-		return fmt.Sprintf("unknown (%d) %s", uint32(iv.Type), iv.Hash)
+		return invVectSummary(invList[0])
 	}
 
 	// More than one inv item.
-	return fmt.Sprintf("size %d", invLen)
+	var numTxns, numBlocks, numMixes uint64
+	for _, iv := range invList {
+		switch iv.Type {
+		case wire.InvTypeTx:
+			numTxns++
+		case wire.InvTypeBlock:
+			numBlocks++
+		case wire.InvTypeMix:
+			numMixes++
+		}
+	}
+
+	diff := uint64(invLen) - (numTxns + numBlocks + numMixes)
+	return fmt.Sprintf("txns %d, blocks %d, mixmsgs %d, other %d", numTxns,
+		numBlocks, numMixes, diff)
 }
 
 // locatorSummary returns a block locator as a human-readable string.
@@ -112,31 +104,23 @@ func locatorSummary(locator []*chainhash.Hash, stopHash *chainhash.Hash) string 
 	}
 
 	return fmt.Sprintf("no locator, stop %s", stopHash)
-
 }
 
-// sanitizeString strips any characters which are even remotely dangerous, such
-// as html control characters, from the passed string.  It also limits it to
-// the passed maximum size, which can be 0 for unlimited.  When the string is
-// limited, it will also add "..." to the string to indicate it was truncated.
-func sanitizeString(str string, maxLength uint) string {
-	const safeChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY" +
-		"Z01234567890 .,;_/:?@"
+type mixMessage interface {
+	Hash() chainhash.Hash
+	Pub() []byte
+	Sid() []byte    // PR returns nil
+	GetRun() uint32 // PR returns 0
+}
 
-	// Strip any characters not in the safeChars string removed.
-	str = strings.Map(func(r rune) rune {
-		if strings.ContainsRune(safeChars, r) {
-			return r
-		}
-		return -1
-	}, str)
-
-	// Limit the string to the max allowed length.
-	if maxLength > 0 && uint(len(str)) > maxLength {
-		str = str[:maxLength]
-		str = str + "..."
+// mixMessageSummary returns short summary of a mixing message as a
+// human-readable string.
+func mixMessageSummary(msg mixMessage) string {
+	if pr, ok := msg.(*wire.MsgMixPairReq); ok {
+		return fmt.Sprintf("identity %x, hash %v", pr.Pub(), pr.Hash())
 	}
-	return str
+	return fmt.Sprintf("identity %x, hash %v, session %x, run %d",
+		msg.Pub(), msg.Hash(), msg.Sid(), msg.GetRun())
 }
 
 // messageSummary returns a human-readable string which summarizes a message.
@@ -156,14 +140,14 @@ func messageSummary(msg wire.Message) string {
 	case *wire.MsgAddr:
 		return fmt.Sprintf("%d addr", len(msg.AddrList))
 
+	case *wire.MsgAddrV2:
+		return fmt.Sprintf("%d addrv2", len(msg.AddrList))
+
 	case *wire.MsgPing:
 		// No summary - perhaps add nonce.
 
 	case *wire.MsgPong:
 		// No summary - perhaps add nonce.
-
-	case *wire.MsgAlert:
-		// No summary.
 
 	case *wire.MsgMemPool:
 		// No summary.
@@ -177,6 +161,23 @@ func messageSummary(msg wire.Message) string {
 		header := &msg.Header
 		return fmt.Sprintf("hash %s, ver %d, %d tx, %s", msg.BlockHash(),
 			header.Version, len(msg.Transactions), header.Timestamp)
+
+	case *wire.MsgMixPairReq:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixKeyExchange:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixCiphertexts:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixSlotReserve:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixDCNet:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixConfirm:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixFactoredPoly:
+		return mixMessageSummary(msg)
+	case *wire.MsgMixSecrets:
+		return mixMessageSummary(msg)
 
 	case *wire.MsgInv:
 		return invSummary(msg.InvList)
@@ -194,21 +195,21 @@ func messageSummary(msg wire.Message) string {
 		return locatorSummary(msg.BlockLocatorHashes, &msg.HashStop)
 
 	case *wire.MsgHeaders:
-		return fmt.Sprintf("num %d", len(msg.Headers))
-
-	case *wire.MsgReject:
-		// Ensure the variable length strings don't contain any
-		// characters which are even remotely dangerous such as HTML
-		// control characters, etc.  Also limit them to sane length for
-		// logging.
-		rejCommand := sanitizeString(msg.Cmd, wire.CommandSize)
-		rejReason := sanitizeString(msg.Reason, maxRejectReasonLen)
-		summary := fmt.Sprintf("cmd %v, code %v, reason %v", rejCommand,
-			msg.Code, rejReason)
-		if rejCommand == wire.CmdBlock || rejCommand == wire.CmdTx {
-			summary += fmt.Sprintf(", hash %v", msg.Hash)
+		summary := fmt.Sprintf("num %d", len(msg.Headers))
+		if len(msg.Headers) > 0 {
+			finalHeader := msg.Headers[len(msg.Headers)-1]
+			summary = fmt.Sprintf("%s, final hash %s, height %d", summary,
+				finalHeader.BlockHash(), finalHeader.Height)
 		}
 		return summary
+
+	case *wire.MsgGetInitState:
+		return fmt.Sprintf("types %v", msg.Types)
+
+	case *wire.MsgInitState:
+		return fmt.Sprintf("blocks %d, votes %d, treasury spends %d",
+			len(msg.BlockHashes), len(msg.VoteHashes),
+			len(msg.TSpendHashes))
 	}
 
 	// No summary for other messages.

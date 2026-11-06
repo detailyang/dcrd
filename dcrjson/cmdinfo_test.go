@@ -1,15 +1,14 @@
 // Copyright (c) 2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package dcrjson_test
+package dcrjson
 
 import (
+	"errors"
 	"reflect"
 	"testing"
-
-	"github.com/decred/dcrd/dcrjson"
 )
 
 // TestCmdMethod tests the CmdMethod function to ensure it returns the expected
@@ -26,38 +25,27 @@ func TestCmdMethod(t *testing.T) {
 		{
 			name: "unregistered type",
 			cmd:  (*int)(nil),
-			err:  dcrjson.Error{Code: dcrjson.ErrUnregisteredMethod},
+			err:  ErrUnregisteredMethod,
 		},
 		{
 			name:   "nil pointer of registered type",
-			cmd:    (*dcrjson.GetBlockCmd)(nil),
+			cmd:    (*testGetBlockCmd)(nil),
 			method: "getblock",
 		},
 		{
-			name:   "nil instance of registered type",
-			cmd:    &dcrjson.GetBlockCountCmd{},
+			name:   "zero instance of registered type",
+			cmd:    &testGetBlockCountCmd{},
 			method: "getblockcount",
 		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		method, err := dcrjson.CmdMethod(test.cmd)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("Test #%d (%s) wrong error - got %T (%[3]v), "+
-				"want %T", i, test.name, err, test.err)
-			continue
-		}
-		if err != nil {
-			gotErrorCode := err.(dcrjson.Error).Code
-			if gotErrorCode != test.err.(dcrjson.Error).Code {
-				t.Errorf("Test #%d (%s) mismatched error code "+
-					"- got %v (%v), want %v", i, test.name,
-					gotErrorCode, err,
-					test.err.(dcrjson.Error).Code)
-				continue
-			}
-
+		method, err := CmdMethod(test.cmd)
+		// Ensure the error is of the expected type.
+		if !errors.Is(err, test.err) {
+			t.Errorf("Test #%d (%s): mismatched error - got %v, "+
+				"want %v", i, test.name, err, test.err)
 			continue
 		}
 
@@ -79,12 +67,12 @@ func TestMethodUsageFlags(t *testing.T) {
 		name   string
 		method string
 		err    error
-		flags  dcrjson.UsageFlag
+		flags  UsageFlag
 	}{
 		{
 			name:   "unregistered type",
 			method: "bogusmethod",
-			err:    dcrjson.Error{Code: dcrjson.ErrUnregisteredMethod},
+			err:    ErrUnregisteredMethod,
 		},
 		{
 			name:   "getblock",
@@ -92,30 +80,18 @@ func TestMethodUsageFlags(t *testing.T) {
 			flags:  0,
 		},
 		{
-			name:   "walletpassphrase",
-			method: "walletpassphrase",
-			flags:  dcrjson.UFWalletOnly,
+			name:   "session",
+			method: "session",
+			flags:  UFWebsocketOnly,
 		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		flags, err := dcrjson.MethodUsageFlags(test.method)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("Test #%d (%s) wrong error - got %T (%[3]v), "+
-				"want %T", i, test.name, err, test.err)
-			continue
-		}
-		if err != nil {
-			gotErrorCode := err.(dcrjson.Error).Code
-			if gotErrorCode != test.err.(dcrjson.Error).Code {
-				t.Errorf("Test #%d (%s) mismatched error code "+
-					"- got %v (%v), want %v", i, test.name,
-					gotErrorCode, err,
-					test.err.(dcrjson.Error).Code)
-				continue
-			}
-
+		flags, err := MethodUsageFlags(test.method)
+		if !errors.Is(err, test.err) {
+			t.Errorf("Test #%d (%s): mismatched error - got %v, "+
+				"want %v", i, test.name, err, test.err)
 			continue
 		}
 
@@ -142,7 +118,7 @@ func TestMethodUsageText(t *testing.T) {
 		{
 			name:   "unregistered type",
 			method: "bogusmethod",
-			err:    dcrjson.Error{Code: dcrjson.ErrUnregisteredMethod},
+			err:    ErrUnregisteredMethod,
 		},
 		{
 			name:     "getblockcount",
@@ -158,22 +134,10 @@ func TestMethodUsageText(t *testing.T) {
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		usage, err := dcrjson.MethodUsageText(test.method)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("Test #%d (%s) wrong error - got %T (%[3]v), "+
-				"want %T", i, test.name, err, test.err)
-			continue
-		}
-		if err != nil {
-			gotErrorCode := err.(dcrjson.Error).Code
-			if gotErrorCode != test.err.(dcrjson.Error).Code {
-				t.Errorf("Test #%d (%s) mismatched error code "+
-					"- got %v (%v), want %v", i, test.name,
-					gotErrorCode, err,
-					test.err.(dcrjson.Error).Code)
-				continue
-			}
-
+		usage, err := MethodUsageText(test.method)
+		if !errors.Is(err, test.err) {
+			t.Errorf("Test #%d (%s): mismatched error - got %v, "+
+				"want %v", i, test.name, err, test.err)
 			continue
 		}
 
@@ -184,9 +148,9 @@ func TestMethodUsageText(t *testing.T) {
 			continue
 		}
 
-		// Get the usage again to excerise caching.
-		usage, err = dcrjson.MethodUsageText(test.method)
-		if err != nil {
+		// Get the usage again to exercise caching.
+		usage, err = MethodUsageText(test.method)
+		if !errors.Is(err, test.err) {
 			t.Errorf("Test #%d (%s) unexpected error: %v", i,
 				test.name, err)
 			continue
@@ -421,7 +385,7 @@ func TestFieldUsage(t *testing.T) {
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
 		// Ensure usage matches the expected value.
-		usage := dcrjson.TstFieldUsage(test.field, test.defValue)
+		usage := fieldUsage(test.field, test.defValue)
 		if usage != test.expected {
 			t.Errorf("Test #%d (%s) mismatched usage - got %v, "+
 				"want %v", i, test.name, usage, test.expected)

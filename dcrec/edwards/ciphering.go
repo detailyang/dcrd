@@ -1,5 +1,5 @@
 // Copyright (c) 2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,11 +10,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
 	"errors"
-	"io"
+
+	"github.com/decred/dcrd/crypto/rand"
 )
 
 var (
@@ -44,7 +44,7 @@ var (
 // RFC5903 Section 9 states we should only return y.
 func GenerateSharedSecret(privkey *PrivateKey, pubkey *PublicKey) []byte {
 	x, y := pubkey.Curve.ScalarMult(pubkey.X, pubkey.Y, privkey.ecPk.D.Bytes())
-	return BigIntPointToEncodedBytes(x, y)[:]
+	return bigIntPointToEncodedBytes(x, y)[:]
 }
 
 // Encrypt encrypts data for the target public key using AES-256-CBC. It also
@@ -64,9 +64,8 @@ func GenerateSharedSecret(privkey *PrivateKey, pubkey *PublicKey) []byte {
 // The primary aim is to ensure byte compatibility with Pyelliptic.
 // Additionally, refer to section 5.8.1 of ANSI X9.63 for rationale on this
 // format.
-func Encrypt(curve *TwistedEdwardsCurve, pubkey *PublicKey, in []byte) ([]byte,
-	error) {
-	ephemeral, err := GeneratePrivateKey(curve)
+func Encrypt(pubkey *PublicKey, in []byte) ([]byte, error) {
+	ephemeral, err := GeneratePrivateKey()
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +78,10 @@ func Encrypt(curve *TwistedEdwardsCurve, pubkey *PublicKey, in []byte) ([]byte,
 	// IV + Curve params/X/Y + padded plaintext/ciphertext + HMAC-256
 	out := make([]byte, aes.BlockSize+36+len(paddedIn)+sha256.Size)
 	iv := out[:aes.BlockSize]
-	if _, err = io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, err
-	}
+	rand.Read(iv)
 	// start writing public key
 	ePubX, ePubY := ephemeral.Public()
-	pbk := NewPublicKey(curve, ePubX, ePubY)
+	pbk := NewPublicKey(ePubX, ePubY)
 	pb := pbk.Serialize()
 	offset := aes.BlockSize
 
@@ -112,8 +109,7 @@ func Encrypt(curve *TwistedEdwardsCurve, pubkey *PublicKey, in []byte) ([]byte,
 }
 
 // Decrypt decrypts data that was encrypted using the Encrypt function.
-func Decrypt(curve *TwistedEdwardsCurve, priv *PrivateKey, in []byte) ([]byte,
-	error) {
+func Decrypt(priv *PrivateKey, in []byte) ([]byte, error) {
 	// IV + Curve params/X/Y + 1 block + HMAC-256
 	if len(in) < aes.BlockSize+36+aes.BlockSize+sha256.Size {
 		return nil, errInputTooShort
@@ -141,7 +137,7 @@ func Decrypt(curve *TwistedEdwardsCurve, priv *PrivateKey, in []byte) ([]byte,
 	copy(pb[0:32], yBytes)
 
 	// check if (X, Y) lies on the curve and create a Pubkey if it does
-	pubkey, err := ParsePubKey(curve, pb)
+	pubkey, err := ParsePubKey(pb)
 	if err != nil {
 		return nil, err
 	}
@@ -183,14 +179,15 @@ func Decrypt(curve *TwistedEdwardsCurve, priv *PrivateKey, in []byte) ([]byte,
 
 // Implement PKCS#7 padding with block size of 16 (AES block size).
 
-// addPKCSPadding adds padding to a block of data
+// addPKCSPadding adds padding to a block of data.
 func addPKCSPadding(src []byte) []byte {
 	padding := aes.BlockSize - len(src)%aes.BlockSize
 	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
 	return append(src, padtext...)
 }
 
-// removePKCSPadding removes padding from data that was added with addPKCSPadding
+// removePKCSPadding removes padding from data that was added with
+// addPKCSPadding.
 func removePKCSPadding(src []byte) ([]byte, error) {
 	length := len(src)
 	padLength := int(src[length-1])

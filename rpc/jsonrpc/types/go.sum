@@ -1,0 +1,6 @@
+github.com/decred/dcrd/chaincfg/chainhash v1.0.5 h1:GwzXLsZoemdDxFdtj3GdW25Z+NXdN6nD3OjVtA+UwiE=
+github.com/decred/dcrd/chaincfg/chainhash v1.0.5/go.mod h1:vCqZMGtKbyxJkdcVzP3Ryc9IvaspVUb7hO6t+rjxmcs=
+github.com/decred/dcrd/crypto/blake256 v1.1.0 h1:zPMNGQCm0g4QTY27fOCorQW7EryeQ/U0x++OzVrdms8=
+github.com/decred/dcrd/crypto/blake256 v1.1.0/go.mod h1:2OfgNZ5wDpcsFmHmCK5gZTPcCXqlm2ArzUIkw9czNJo=
+github.com/decred/dcrd/dcrjson/v4 v4.2.0 h1:VZOitxS5/J1Gr8V/rUcVnvbtTvijxrVy7i2A3nu9wto=
+github.com/decred/dcrd/dcrjson/v4 v4.2.0/go.mod h1:1YuURV3cVmko3lmBlkKc6Y2iHwHJJXATdiLULBS9D+Q=

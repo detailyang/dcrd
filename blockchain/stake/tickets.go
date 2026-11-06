@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,12 +7,11 @@ package stake
 import (
 	"fmt"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/dbnamespace"
-	"github.com/decred/dcrd/blockchain/stake/internal/ticketdb"
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/dbnamespace"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/ticketdb"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v3"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -20,11 +19,35 @@ import (
 // stored in memory in the node.
 type UndoTicketDataSlice []ticketdb.UndoTicketData
 
+// StakeParams defines an interface that is used to provides the parameters
+// required working with stake nodes.  These values are typically well-defined
+// and unique per network.
+type StakeParams interface {
+	// VotesPerBlock returns the maximum number of votes a block must contain to
+	// receive full subsidy.
+	VotesPerBlock() uint16
+
+	// StakeValidationBeginHeight returns the height at which votes become
+	// required to extend a block.  This height is the first that will be voted
+	// on, but will not include any votes itself.
+	StakeValidationBeginHeight() int64
+
+	// StakeEnableHeight returns the height at which the first ticket could
+	// possibly mature.
+	StakeEnableHeight() int64
+
+	// TicketExpiryBlocks returns the number of blocks after maturity that
+	// tickets expire. This will be >= (StakeEnableHeight() +
+	// StakeValidationBeginHeight()).
+	TicketExpiryBlocks() uint32
+}
+
 // Node is in-memory stake data for a node.  It contains a list of database
-// updates to be written in the case that the block is inserted in the main chain
-// database.  Because of its use of immutable treap data structures, it allows for
-// a fast, efficient in-memory representation of the ticket database for each
-// node.  It handles connection of and disconnection of new blocks simply.
+// updates to be written in the case that the block is inserted in the main
+// chain database.  Because of its use of immutable treap data structures, it
+// allows for a fast, efficient in-memory representation of the ticket database
+// for each node.  It handles connection of and disconnection of new blocks
+// simply.
 //
 // Like the immutable treap structures, stake nodes themselves are considered
 // to be immutable.  The connection or disconnection of past or future nodes
@@ -57,8 +80,8 @@ type Node struct {
 	// tickets pool.
 	finalState [6]byte
 
-	// params is the blockchain parameters.
-	params *chaincfg.Params
+	// params is the blockchain stake parameters.
+	params StakeParams
 }
 
 // UndoData returns the stored UndoTicketDataSlice used to remove this node
@@ -85,7 +108,10 @@ func (sn *Node) SpentByBlock() []chainhash.Hash {
 	return spent
 }
 
-// MissedByBlock returns the tickets that were missed in this block.
+// MissedByBlock returns the tickets that were missed in this block. This
+// includes expired tickets and winning tickets that were not spent by a vote.
+// Also note that when a miss is later revoked, that ticket hash will also
+// appear in the output of this function for the block with the revocation.
 func (sn *Node) MissedByBlock() []chainhash.Hash {
 	var missed []chainhash.Hash
 	for _, undo := range sn.databaseUndoUpdate {
@@ -95,6 +121,66 @@ func (sn *Node) MissedByBlock() []chainhash.Hash {
 	}
 
 	return missed
+}
+
+// ExpiredByBlock returns the tickets that expired in this block. This is a
+// subset of the missed tickets returned by MissedByBlock. The output only
+// includes the initial expiration of the ticket, not when an expired ticket is
+// revoked. This is unlike MissedByBlock that includes the revocation as well.
+func (sn *Node) ExpiredByBlock() []chainhash.Hash {
+	var expired []chainhash.Hash
+	for _, undo := range sn.databaseUndoUpdate {
+		if undo.Expired && !undo.Revoked {
+			expired = append(expired, undo.TicketHash)
+		}
+	}
+
+	return expired
+}
+
+// ExpiringNextBlock returns the tickets that will expire in the next block.
+func (sn *Node) ExpiringNextBlock() []chainhash.Hash {
+	// Determine the height of tickets that will expire in the next block.
+	nextBlockHeight := sn.height + 1
+	toExpireHeight := uint32(0)
+	if nextBlockHeight > sn.params.TicketExpiryBlocks() {
+		toExpireHeight = nextBlockHeight - sn.params.TicketExpiryBlocks()
+	}
+
+	// Create a map of the winning ticket hashes.
+	winners := sn.Winners()
+	winningHashes := make(map[chainhash.Hash]struct{}, sn.params.VotesPerBlock())
+	for _, ticketHash := range winners {
+		winningHashes[ticketHash] = struct{}{}
+	}
+
+	// Find all tickets in the live ticket treap that are set to expire next
+	// block.
+	var expiringNextBlockHashes []chainhash.Hash
+	sn.liveTickets.ForEachByHeight(toExpireHeight+1, func(k tickettreap.Key, v *tickettreap.Value) bool {
+		// Since ForEachByHeight iterates all elements in the tree _less_ than a
+		// given height, continue if the height is not equal to the height that is
+		// set to expire next block.
+		//
+		// Note that this should never get hit since any height less than the height
+		// that is set to expire next block should have already expired and been
+		// moved out of the live ticket treap.
+		if v.Height != toExpireHeight {
+			return true
+		}
+
+		// Don't include winning tickets since they will either vote or be missed in
+		// the next block rather than become expired.
+		ticketHash := chainhash.Hash(k)
+		if _, ok := winningHashes[ticketHash]; ok {
+			return true
+		}
+
+		expiringNextBlockHashes = append(expiringNextBlockHashes, ticketHash)
+		return true
+	})
+
+	return expiringNextBlockHashes
 }
 
 // ExistsLiveTicket returns whether or not a ticket exists in the live ticket
@@ -193,7 +279,7 @@ func (sn *Node) Height() uint32 {
 
 // genesisNode returns a pointer to the initialized ticket database for the
 // genesis block.
-func genesisNode(params *chaincfg.Params) *Node {
+func genesisNode(params StakeParams) *Node {
 	return &Node{
 		height:               0,
 		liveTickets:          &tickettreap.Immutable{},
@@ -206,9 +292,22 @@ func genesisNode(params *chaincfg.Params) *Node {
 	}
 }
 
+// ResetDatabase resets the ticket database back to the genesis block.
+func ResetDatabase(dbTx database.Tx, params StakeParams, genesisHash *chainhash.Hash) error {
+	// Remove all of the database buckets.
+	err := ticketdb.DbRemoveAllBuckets(dbTx)
+	if err != nil {
+		return err
+	}
+
+	// Initialize the database.
+	_, err = InitDatabaseState(dbTx, params, genesisHash)
+	return err
+}
+
 // InitDatabaseState initializes the chain with the best state being the
 // genesis block.
-func InitDatabaseState(dbTx database.Tx, params *chaincfg.Params) (*Node, error) {
+func InitDatabaseState(dbTx database.Tx, params StakeParams, genesisHash *chainhash.Hash) (*Node, error) {
 	// Create the database.
 	err := ticketdb.DbCreate(dbTx)
 	if err != nil {
@@ -231,14 +330,14 @@ func InitDatabaseState(dbTx database.Tx, params *chaincfg.Params) (*Node, error)
 	}
 
 	// Write the new best state to the database.
-	nextWinners := make([]chainhash.Hash, int(genesis.params.TicketsPerBlock))
+	nextWinners := make([]chainhash.Hash, int(genesis.params.VotesPerBlock()))
 	err = ticketdb.DbPutBestState(dbTx, ticketdb.BestChainState{
-		Hash:        *params.GenesisHash,
+		Hash:        *genesisHash,
 		Height:      genesis.height,
 		Live:        uint32(genesis.liveTickets.Len()),
 		Missed:      uint64(genesis.missedTickets.Len()),
 		Revoked:     uint64(genesis.revokedTickets.Len()),
-		PerBlock:    genesis.params.TicketsPerBlock,
+		PerBlock:    genesis.params.VotesPerBlock(),
 		NextWinners: nextWinners,
 	})
 	if err != nil {
@@ -255,7 +354,7 @@ func InitDatabaseState(dbTx database.Tx, params *chaincfg.Params) (*Node, error)
 // checks to ensure that the database has not failed the upgrade process and
 // reports the current version.  Upgrades are also handled by this function,
 // when they become applicable.
-func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, header wire.BlockHeader, params *chaincfg.Params) (*Node, error) {
+func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, header wire.BlockHeader, params StakeParams) (*Node, error) {
 	info, err := ticketdb.DbFetchDatabaseInfo(dbTx)
 	if err != nil {
 		return nil, err
@@ -267,7 +366,8 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 		return nil, err
 	}
 	if state.Hash != blockHash || state.Height != height {
-		return nil, stakeRuleError(ErrDatabaseCorrupt, "best state corruption")
+		str := "best state corruption"
+		return nil, stakeRuleError(ErrDatabaseCorrupt, str)
 	}
 
 	// Restore the best node treaps form the database.
@@ -280,10 +380,9 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 		return nil, err
 	}
 	if node.liveTickets.Len() != int(state.Live) {
-		return nil, stakeRuleError(ErrDatabaseCorrupt,
-			fmt.Sprintf("live tickets corruption (got "+
-				"%v in state but loaded %v)", int(state.Live),
-				node.liveTickets.Len()))
+		str := fmt.Sprintf("live tickets corruption (got %v in state but "+
+			"loaded %v)", int(state.Live), node.liveTickets.Len())
+		return nil, stakeRuleError(ErrDatabaseCorrupt, str)
 	}
 	node.missedTickets, err = ticketdb.DbLoadAllTickets(dbTx,
 		dbnamespace.MissedTicketsBucketName)
@@ -291,10 +390,9 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 		return nil, err
 	}
 	if node.missedTickets.Len() != int(state.Missed) {
-		return nil, stakeRuleError(ErrDatabaseCorrupt,
-			fmt.Sprintf("missed tickets corruption (got "+
-				"%v in state but loaded %v)", int(state.Missed),
-				node.missedTickets.Len()))
+		str := fmt.Sprintf("missed tickets corruption (got %v in state but "+
+			"loaded %v)", int(state.Missed), node.missedTickets.Len())
+		return nil, stakeRuleError(ErrDatabaseCorrupt, str)
 	}
 	node.revokedTickets, err = ticketdb.DbLoadAllTickets(dbTx,
 		dbnamespace.RevokedTicketsBucketName)
@@ -302,10 +400,9 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 		return nil, err
 	}
 	if node.revokedTickets.Len() != int(state.Revoked) {
-		return nil, stakeRuleError(ErrDatabaseCorrupt,
-			fmt.Sprintf("revoked tickets corruption (got "+
-				"%v in state but loaded %v)", int(state.Revoked),
-				node.revokedTickets.Len()))
+		str := fmt.Sprintf("revoked tickets corruption (got %v in state but "+
+			"loaded %v)", int(state.Revoked), node.revokedTickets.Len())
+		return nil, stakeRuleError(ErrDatabaseCorrupt, str)
 	}
 
 	// Restore the node undo and new tickets data.
@@ -320,15 +417,13 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 
 	// Restore the next winners for the node.
 	node.nextWinners = make([]chainhash.Hash, 0)
-	if node.height >= uint32(node.params.StakeValidationHeight-1) {
+	if node.height >= uint32(params.StakeValidationBeginHeight()-1) {
 		node.nextWinners = make([]chainhash.Hash, len(state.NextWinners))
-		for i := range state.NextWinners {
-			node.nextWinners[i] = state.NextWinners[i]
-		}
+		copy(node.nextWinners, state.NextWinners)
 
 		// Calculate the final state from the block header.
 		stateBuffer := make([]byte, 0,
-			(node.params.TicketsPerBlock+1)*chainhash.HashSize)
+			(params.VotesPerBlock()+1)*chainhash.HashSize)
 		for _, ticketHash := range node.nextWinners {
 			stateBuffer = append(stateBuffer, ticketHash[:]...)
 		}
@@ -338,7 +433,7 @@ func LoadBestNode(dbTx database.Tx, height uint32, blockHash chainhash.Hash, hea
 		}
 		prng := NewHash256PRNG(hB)
 		_, err = findTicketIdxs(node.liveTickets.Len(),
-			node.params.TicketsPerBlock, prng)
+			params.VotesPerBlock(), prng)
 		if err != nil {
 			return nil, err
 		}
@@ -366,15 +461,15 @@ func hashInSlice(h chainhash.Hash, list []chainhash.Hash) bool {
 // safeGet fetches a pointer to the data for the key in the treap, then
 // copies the value so that the original pointer to the key is never written
 // to accidentally later.
-// TODO This function could also check to make sure the states of the ticket
-//       treap value are valid.
 func safeGet(t *tickettreap.Immutable, k tickettreap.Key) (*tickettreap.Value, error) {
+	// TODO: This function could also check to make sure the states of the
+	//       ticket treap value are valid.
+
 	v := t.Get(k)
 	if v == nil {
-		h := chainhash.Hash(k)
-		return nil, stakeRuleError(ErrMissingTicket, fmt.Sprintf(
-			"ticket %v was supposed to be in the passed "+
-				"treap, but could not be found", h))
+		str := fmt.Sprintf("ticket %v was supposed to be in the passed "+
+			"treap, but could not be found", chainhash.Hash(k))
+		return nil, stakeRuleError(ErrMissingTicket, str)
 	}
 
 	return &tickettreap.Value{
@@ -389,12 +484,14 @@ func safeGet(t *tickettreap.Immutable, k tickettreap.Key) (*tickettreap.Value, e
 // safePut is used to put a value into an immutable ticket treap, returning
 // the mutated, immutable treap given as a result.  It first checks to see if
 // there is already this key in the treap. If there is, it returns an error.
-// TODO This function could also check to make sure the states of the ticket
-//       treap value are valid.
 func safePut(t *tickettreap.Immutable, k tickettreap.Key, v *tickettreap.Value) (*tickettreap.Immutable, error) {
+	// TODO This function could also check to make sure the states of the ticket
+	//      treap value are valid.
+
 	if t.Has(k) {
-		return nil, stakeRuleError(ErrDuplicateTicket, fmt.Sprintf("attempted "+
-			"to insert duplicate key %v into treap", chainhash.Hash(k)))
+		str := fmt.Sprintf("attempted to insert duplicate key %v into treap",
+			chainhash.Hash(k))
+		return nil, stakeRuleError(ErrDuplicateTicket, str)
 	}
 
 	return t.Put(k, v), nil
@@ -405,8 +502,9 @@ func safePut(t *tickettreap.Immutable, k tickettreap.Key, v *tickettreap.Value) 
 // the key exists in the treap. If it does not, it returns an error.
 func safeDelete(t *tickettreap.Immutable, k tickettreap.Key) (*tickettreap.Immutable, error) {
 	if !t.Has(k) {
-		return nil, stakeRuleError(ErrMissingTicket, fmt.Sprintf("attempted to "+
-			"delete non-existing key %v from treap", chainhash.Hash(k)))
+		str := fmt.Sprintf("attempted to delete non-existing key %v "+
+			"from treap", chainhash.Hash(k))
+		return nil, stakeRuleError(ErrMissingTicket, str)
 	}
 
 	return t.Delete(k), nil
@@ -417,7 +515,7 @@ func safeDelete(t *tickettreap.Immutable, k tickettreap.Key) (*tickettreap.Immut
 // the argument node is the parent node, and that the child stake node is
 // returned after subsequent modification of the parent node's immutable
 // data.
-func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revokedTickets, newTickets []chainhash.Hash) (*Node, error) {
+func connectNode(node *Node, lotteryIV chainhash.Hash, ticketsVoted, revokedTickets, newTickets []chainhash.Hash) (*Node, error) {
 	if node == nil {
 		return nil, fmt.Errorf("missing stake node pointer input when connecting")
 	}
@@ -433,16 +531,16 @@ func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revok
 		params:               node.params,
 	}
 
-	// We only have to deal with voted related issues and expiry after
+	// We only have to deal with vote-related issues and expiry after
 	// StakeEnabledHeight.
 	var err error
-	if connectedNode.height >= uint32(connectedNode.params.StakeEnabledHeight) {
+	if connectedNode.height >= uint32(connectedNode.params.StakeEnableHeight()) {
 		// Basic sanity check.
-		for i := range ticketsSpentInBlock {
-			if !hashInSlice(ticketsSpentInBlock[i], node.nextWinners) {
-				return nil, stakeRuleError(ErrUnknownTicketSpent,
-					fmt.Sprintf("unknown ticket %v spent in block",
-						ticketsSpentInBlock[i]))
+		for i := range ticketsVoted {
+			if !hashInSlice(ticketsVoted[i], node.nextWinners) {
+				str := fmt.Sprintf("unknown ticket %v spent in block",
+					ticketsVoted[i])
+				return nil, stakeRuleError(ErrUnknownTicketSpent, str)
 			}
 		}
 
@@ -463,7 +561,7 @@ func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revok
 			// ticket should still be in the live tickets treap, we probably
 			// do not have to use the safe delete functions, but do so anyway
 			// just to be safe.
-			if hashInSlice(ticket, ticketsSpentInBlock) {
+			if hashInSlice(ticket, ticketsVoted) {
 				v.Spent = true
 				v.Missed = false
 				connectedNode.liveTickets, err =
@@ -501,9 +599,9 @@ func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revok
 		// the winners are from the cached information in the previous block, so
 		// no drop the results of that here.
 		toExpireHeight := uint32(0)
-		if connectedNode.height > connectedNode.params.TicketExpiry {
+		if connectedNode.height > connectedNode.params.TicketExpiryBlocks() {
 			toExpireHeight = connectedNode.height -
-				connectedNode.params.TicketExpiry
+				connectedNode.params.TicketExpiryBlocks()
 		}
 
 		connectedNode.liveTickets.ForEachByHeight(toExpireHeight+1, func(treapKey tickettreap.Key, value *tickettreap.Value) bool {
@@ -601,24 +699,20 @@ func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revok
 			})
 	}
 
-	// The first block voted on is at StakeEnabledHeight, so begin calculating
-	// winners at the block before StakeEnabledHeight.
+	// The first block voted on is at StakeValidationHeight, so begin calculating
+	// winners at the block before StakeValidationHeight.
 	if connectedNode.height >=
-		uint32(connectedNode.params.StakeValidationHeight-1) {
+		uint32(connectedNode.params.StakeValidationBeginHeight()-1) {
 		// Find the next set of winners.
-		hB, err := header.Bytes()
-		if err != nil {
-			return nil, err
-		}
-		prng := NewHash256PRNG(hB)
+		prng := NewHash256PRNGFromIV(lotteryIV)
 		idxs, err := findTicketIdxs(connectedNode.liveTickets.Len(),
-			connectedNode.params.TicketsPerBlock, prng)
+			connectedNode.params.VotesPerBlock(), prng)
 		if err != nil {
 			return nil, err
 		}
 
 		stateBuffer := make([]byte, 0,
-			(connectedNode.params.TicketsPerBlock+1)*chainhash.HashSize)
+			(connectedNode.params.VotesPerBlock()+1)*chainhash.HashSize)
 		nextWinnersKeys, err := fetchWinners(idxs, connectedNode.liveTickets)
 		if err != nil {
 			return nil, err
@@ -640,16 +734,16 @@ func connectNode(node *Node, header wire.BlockHeader, ticketsSpentInBlock, revok
 
 // ConnectNode connects a stake node to the node and returns a pointer
 // to the stake node of the child.
-func (sn *Node) ConnectNode(header wire.BlockHeader, ticketsSpentInBlock, revokedTickets, newTickets []chainhash.Hash) (*Node, error) {
-	return connectNode(sn, header, ticketsSpentInBlock,
-		revokedTickets, newTickets)
+func (sn *Node) ConnectNode(lotteryIV chainhash.Hash, ticketsVoted, revokedTickets, newTickets []chainhash.Hash) (*Node, error) {
+	return connectNode(sn, lotteryIV, ticketsVoted, revokedTickets,
+		newTickets)
 }
 
 // disconnectNode disconnects a stake node from itself and returns the state of
 // the parent node.  The database transaction should be included if the
 // UndoTicketDataSlice or tickets are nil in order to look up the undo data or
 // tickets from the database.
-func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTicketDataSlice, parentTickets []chainhash.Hash, dbTx database.Tx) (*Node, error) {
+func disconnectNode(node *Node, parentLotteryIV chainhash.Hash, parentUtds UndoTicketDataSlice, parentTickets []chainhash.Hash, dbTx database.Tx) (*Node, error) {
 	// Edge case for the parent being the genesis block.
 	if node.height == 1 {
 		return genesisNode(node.params), nil
@@ -667,8 +761,9 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 	// disk.
 	if parentUtds == nil || parentTickets == nil {
 		if dbTx == nil {
-			return nil, stakeRuleError(ErrMissingDatabaseTx, "needed to "+
-				"look up undo data in the database, but no dbtx passed")
+			str := "needed to look up undo data in the database, but " +
+				"no dbtx passed"
+			return nil, stakeRuleError(ErrMissingDatabaseTx, str)
 		}
 
 		var err error
@@ -683,6 +778,7 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 		}
 	}
 
+	votesPerBlock := node.params.VotesPerBlock()
 	restoredNode := &Node{
 		height:               node.height - 1,
 		liveTickets:          node.liveTickets,
@@ -690,16 +786,22 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 		revokedTickets:       node.revokedTickets,
 		databaseUndoUpdate:   parentUtds,
 		databaseBlockTickets: parentTickets,
-		nextWinners:          make([]chainhash.Hash, 0),
+		nextWinners:          make([]chainhash.Hash, 0, votesPerBlock),
 		params:               node.params,
 	}
 
-	// Iterate through the block undo data and write all database
-	// changes to the respective treap, reversing all the changes
-	// added when the child block was added to the chain.
-	stateBuffer := make([]byte, 0,
-		(node.params.TicketsPerBlock+1)*chainhash.HashSize)
-	for _, undo := range node.databaseUndoUpdate {
+	// Iterate through the block undo data and write all database changes to the
+	// respective treap, reversing all the changes added when the child block was
+	// added to the chain.
+	//
+	// Note that the undo data must be applied in reverse order since there may
+	// be multiple changes for the same ticket.  For example, when the automatic
+	// revocations agenda is enabled a ticket can become missed and revoked in the
+	// same block.  This is recorded as two separate entries in the undo data and
+	// must be processed in reverse order when disconnecting.
+	winners := make([]chainhash.Hash, 0, votesPerBlock)
+	for i := len(node.databaseUndoUpdate) - 1; i >= 0; i-- {
+		undo := node.databaseUndoUpdate[i]
 		var err error
 		k := tickettreap.Key(undo.TicketHash)
 		v := &tickettreap.Value{
@@ -743,10 +845,7 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 			// Expired tickets could never have been
 			// winners.
 			if !undo.Expired {
-				restoredNode.nextWinners = append(restoredNode.nextWinners,
-					undo.TicketHash)
-				stateBuffer = append(stateBuffer,
-					undo.TicketHash[:]...)
+				winners = append(winners, undo.TicketHash)
 			} else {
 				v.Expired = false
 			}
@@ -767,9 +866,7 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 		// winners.
 		case undo.Spent:
 			v.Spent = false
-			restoredNode.nextWinners = append(restoredNode.nextWinners,
-				undo.TicketHash)
-			stateBuffer = append(stateBuffer, undo.TicketHash[:]...)
+			winners = append(winners, undo.TicketHash)
 			restoredNode.liveTickets, err =
 				safePut(restoredNode.liveTickets, k, v)
 			if err != nil {
@@ -777,19 +874,25 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 			}
 
 		default:
-			return nil, stakeRuleError(ErrMemoryCorruption,
-				"unknown ticket state in undo data")
+			str := "unknown ticket state in undo data"
+			return nil, stakeRuleError(ErrMemoryCorruption, str)
 		}
 	}
 
-	if node.height >= uint32(node.params.StakeValidationHeight) {
-		phB, err := parentHeader.Bytes()
-		if err != nil {
-			return nil, err
-		}
-		prng := NewHash256PRNG(phB)
-		_, err = findTicketIdxs(restoredNode.liveTickets.Len(),
-			node.params.TicketsPerBlock, prng)
+	// Set the next winners on the restored node.  The winners are appended in
+	// reverse order since the undo data is applied in reverse above.
+	numWinners := len(winners)
+	stateBuffer := make([]byte, 0, (numWinners+1)*chainhash.HashSize)
+	for i := numWinners - 1; i >= 0; i-- {
+		winner := winners[i]
+		restoredNode.nextWinners = append(restoredNode.nextWinners, winner)
+		stateBuffer = append(stateBuffer, winner[:]...)
+	}
+
+	if node.height >= uint32(node.params.StakeValidationBeginHeight()) {
+		prng := NewHash256PRNGFromIV(parentLotteryIV)
+		_, err := findTicketIdxs(restoredNode.liveTickets.Len(),
+			node.params.VotesPerBlock(), prng)
 		if err != nil {
 			return nil, err
 		}
@@ -803,8 +906,8 @@ func disconnectNode(node *Node, parentHeader wire.BlockHeader, parentUtds UndoTi
 
 // DisconnectNode disconnects a stake node from the node and returns a pointer
 // to the stake node of the parent.
-func (sn *Node) DisconnectNode(parentHeader wire.BlockHeader, parentUtds UndoTicketDataSlice, parentTickets []chainhash.Hash, dbTx database.Tx) (*Node, error) {
-	return disconnectNode(sn, parentHeader, parentUtds, parentTickets, dbTx)
+func (sn *Node) DisconnectNode(parentLotteryIV chainhash.Hash, parentUtds UndoTicketDataSlice, parentTickets []chainhash.Hash, dbTx database.Tx) (*Node, error) {
+	return disconnectNode(sn, parentLotteryIV, parentUtds, parentTickets, dbTx)
 }
 
 // WriteConnectedBestNode writes the newly connected best node to the database
@@ -870,8 +973,8 @@ func WriteConnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash) e
 			}
 
 		default:
-			return stakeRuleError(ErrMemoryCorruption,
-				"unknown ticket state in undo data")
+			str := "unknown ticket state in undo data"
+			return stakeRuleError(ErrMemoryCorruption, str)
 		}
 	}
 
@@ -891,8 +994,8 @@ func WriteConnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash) e
 	}
 
 	// Write the new best state to the database.
-	nextWinners := make([]chainhash.Hash, int(node.params.TicketsPerBlock))
-	if node.height >= uint32(node.params.StakeValidationHeight-1) {
+	nextWinners := make([]chainhash.Hash, int(node.params.VotesPerBlock()))
+	if node.height >= uint32(node.params.StakeValidationBeginHeight()-1) {
 		for i := range nextWinners {
 			nextWinners[i] = node.nextWinners[i]
 		}
@@ -904,7 +1007,7 @@ func WriteConnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash) e
 		Live:        uint32(node.liveTickets.Len()),
 		Missed:      uint64(node.missedTickets.Len()),
 		Revoked:     uint64(node.revokedTickets.Len()),
-		PerBlock:    node.params.TicketsPerBlock,
+		PerBlock:    node.params.VotesPerBlock(),
 		NextWinners: nextWinners,
 	})
 }
@@ -938,11 +1041,17 @@ func WriteDisconnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash
 		}
 	}
 
-	// Iterate through the block undo data and write all database
-	// changes to the respective on-disk map, reversing all the
-	// changes added when the child block was added to the block
-	// chain.
-	for _, undo := range childUndoData {
+	// Iterate through the block undo data and write all database changes to the
+	// respective on-disk map, reversing all the changes added when the child
+	// block was added to the block chain.
+	//
+	// Note that the undo data must be applied in reverse order since there may
+	// be multiple changes for the same ticket.  For example, when the automatic
+	// revocations agenda is enabled a ticket can become missed and revoked in the
+	// same block.  This is recorded as two separate entries in the undo data and
+	// must be processed in reverse order when disconnecting.
+	for i := len(childUndoData) - 1; i >= 0; i-- {
+		undo := childUndoData[i]
 		var err error
 		switch {
 		// All flags are unset; this is a newly added ticket.
@@ -1001,8 +1110,8 @@ func WriteDisconnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash
 			}
 
 		default:
-			return stakeRuleError(ErrMemoryCorruption,
-				"unknown ticket state in undo data")
+			str := "unknown ticket state in undo data"
+			return stakeRuleError(ErrMemoryCorruption, str)
 		}
 	}
 
@@ -1022,8 +1131,9 @@ func WriteDisconnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash
 	}
 
 	// Write the new best state to the database.
-	nextWinners := make([]chainhash.Hash, int(node.params.TicketsPerBlock))
-	if node.height >= uint32(node.params.StakeValidationHeight-1) {
+	params := node.params
+	nextWinners := make([]chainhash.Hash, int(params.VotesPerBlock()))
+	if node.height >= uint32(params.StakeValidationBeginHeight()-1) {
 		for i := range nextWinners {
 			nextWinners[i] = node.nextWinners[i]
 		}
@@ -1035,7 +1145,7 @@ func WriteDisconnectedBestNode(dbTx database.Tx, node *Node, hash chainhash.Hash
 		Live:        uint32(node.liveTickets.Len()),
 		Missed:      uint64(node.missedTickets.Len()),
 		Revoked:     uint64(node.revokedTickets.Len()),
-		PerBlock:    node.params.TicketsPerBlock,
+		PerBlock:    params.VotesPerBlock(),
 		NextWinners: nextWinners,
 	})
 }

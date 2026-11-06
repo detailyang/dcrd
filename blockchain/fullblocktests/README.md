@@ -1,9 +1,9 @@
 fullblocktests
 ==============
 
-[![Build Status](http://img.shields.io/travis/decred/dcrd.svg)](https://travis-ci.org/decred/dcrd)
-[![ISC License](http://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
-[![GoDoc](https://img.shields.io/badge/godoc-reference-blue.svg)](http://godoc.org/github.com/decred/dcrd/blockchain/fullblocktests)
+[![Build Status](https://github.com/decred/dcrd/workflows/Build%20and%20Test/badge.svg)](https://github.com/decred/dcrd/actions)
+[![ISC License](https://img.shields.io/badge/license-ISC-blue.svg)](http://copyfree.org)
+[![Doc](https://img.shields.io/badge/doc-reference-blue.svg)](https://pkg.go.dev/github.com/decred/dcrd/blockchain/v5/fullblocktests)
 
 Package fullblocktests provides a set of full block tests to be used for testing
 the consensus validation rules.  The tests are intended to be flexible enough to
@@ -15,13 +15,12 @@ independent versions over the peer-to-peer network.
 
 This package has intentionally been designed so it can be used as a standalone
 package for any projects needing to test their implementation against a full set
-of blocks that excerise the consensus validation rules.
+of blocks that exercise the consensus validation rules.
 
 ## Installation and Updating
 
-```bash
-$ go get -u github.com/decred/dcrd/blockchain/fullblocktests
-```
+This package is part of the `github.com/decred/dcrd/blockchain/v5` module.  Use
+the standard go tooling for working with modules to incorporate it.
 
 ## License
 

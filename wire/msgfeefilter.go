@@ -1,5 +1,5 @@
 // Copyright (c) 2016 The btcsuite developers
-// Copyright (c) 2017 The Decred developers
+// Copyright (c) 2017-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -23,35 +23,27 @@ type MsgFeeFilter struct {
 // BtcDecode decodes r using the protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgFeeFilter) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgFeeFilter.BtcDecode"
 	if pver < FeeFilterVersion {
-		str := fmt.Sprintf("feefilter message invalid for protocol "+
+		msg := fmt.Sprintf("feefilter message invalid for protocol "+
 			"version %d", pver)
-		return messageError("MsgFeeFilter.BtcDecode", str)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
 	}
 
-	err := readElement(r, &msg.MinFee)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return readElement(r, &msg.MinFee)
 }
 
 // BtcEncode encodes the receiver to w using the protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgFeeFilter) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgFeeFilter.BtcEncode"
 	if pver < FeeFilterVersion {
-		str := fmt.Sprintf("feefilter message invalid for protocol "+
+		msg := fmt.Sprintf("feefilter message invalid for protocol "+
 			"version %d", pver)
-		return messageError("MsgFeeFilter.BtcEncode", str)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
 	}
 
-	err := writeElement(w, msg.MinFee)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return writeElement(w, &msg.MinFee)
 }
 
 // Command returns the protocol command string for the message.  This is part
@@ -63,6 +55,13 @@ func (msg *MsgFeeFilter) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgFeeFilter) MaxPayloadLength(pver uint32) uint32 {
+	// 8 bytes min fee.
+	return 8
+}
+
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgFeeFilter) SerializeSize() int {
 	// 8 bytes min fee.
 	return 8
 }

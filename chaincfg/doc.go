@@ -1,3 +1,8 @@
+// Copyright (c) 2013-2016 The btcsuite developers
+// Copyright (c) 2015-2022 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 // Package chaincfg defines chain configuration parameters.
 //
 // In addition to the main Decred network, which is intended for the transfer
@@ -7,55 +12,48 @@
 // handle errors where input intended for one network is used on an application
 // instance running on a different network.
 //
-// For library packages, chaincfg provides the ability to lookup chain
-// parameters and encoding magics when passed a *Params.  Older APIs not updated
-// to the new convention of passing a *Params may lookup the parameters for a
-// wire.DecredNet using ParamsForNet, but be aware that this usage is
-// deprecated and will be removed from chaincfg in the future.
-//
 // For main packages, a (typically global) var may be assigned the address of
 // one of the standard Param vars for use as the application's "active" network.
 // When a network parameter is needed, it may then be looked up through this
 // variable (either directly, or hidden in a library call).
 //
-//  package main
+//	package main
 //
-//  import (
-//          "flag"
-//          "fmt"
-//          "log"
+//	import (
+//		"flag"
+//		"fmt"
+//		"log"
 //
-//          "github.com/decred/dcrd/dcrutil"
-//          "github.com/decred/dcrd/chaincfg"
-//  )
+//		"github.com/decred/dcrd/chaincfg/v3"
+//		"github.com/decred/dcrd/txscript/v4/stdaddr"
+//	)
 //
-//  var testnet = flag.Bool("testnet", false, "operate on the testnet Decred network")
+//	func main() {
+//		var testnet = flag.Bool("testnet", false, "operate on the test network")
+//		flag.Parse()
 //
-//  // By default (without -testnet), use mainnet.
-//  var chainParams = &chaincfg.MainNetParams
+//		// By default (without -testnet), use mainnet.
+//		var chainParams = chaincfg.MainNetParams()
 //
-//  func main() {
-//          flag.Parse()
+//		// Modify active network parameters if operating on testnet.
+//		if *testnet {
+//			chainParams = chaincfg.TestNet3Params()
+//		}
 //
-//          // Modify active network parameters if operating on testnet.
-//          if *testnet {
-//                  chainParams = &chaincfg.TestNetParams
-//          }
+//		// later...
 //
-//          // later...
+//		// Create and print new payment address, specific to the active network.
+//		pubKeyHash := make([]byte, 20)
+//		addr, err := stdaddr.NewAddressPubKeyHashEcdsaSecp256k1V0(pubKeyHash,
+//			chainParams)
+//		if err != nil {
+//			log.Fatal(err)
+//		}
+//		fmt.Println(addr)
+//	}
 //
-//          // Create and print new payment address, specific to the active network.
-//          pubKeyHash := make([]byte, 20)
-//          addr, err := dcrutil.NewAddressPubKeyHash(pubKeyHash, chainParams)
-//          if err != nil {
-//                  log.Fatal(err)
-//          }
-//          fmt.Println(addr)
-//  }
-//
-// If an application does not use one of the three standard Decred networks,
-// a new Params struct may be created which defines the parameters for the
+// If an application does not use one of the standard Decred networks, a new
+// Params struct may be created which defines the parameters for the
 // non-standard network.  As a general rule of thumb, all network parameters
-// should be unique to the network, but parameter collisions can still occur
-// (unfortunately, this is the case with regtest and testnet sharing magics).
+// should be unique to the network, but parameter collisions can still occur.
 package chaincfg

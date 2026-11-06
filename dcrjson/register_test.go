@@ -1,42 +1,61 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package dcrjson_test
+package dcrjson
 
 import (
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
-
-	"github.com/decred/dcrd/dcrjson"
 )
+
+// Register methods for testing purposes.  This does not conflict with
+// registration performed by external packages as they are done in separate
+// builds.
+func init() {
+	MustRegister("getblock", (*testGetBlockCmd)(nil), 0)
+	MustRegister("getblockcount", (*testGetBlockCountCmd)(nil), 0)
+	MustRegister("session", (*testSessionCmd)(nil), UFWebsocketOnly)
+	MustRegister("help", (*testHelpCmd)(nil), 0)
+}
+
+type testGetBlockCmd struct {
+	Hash      string
+	Verbose   *bool `jsonrpcdefault:"true"`
+	VerboseTx *bool `jsonrpcdefault:"false"`
+}
+type testGetBlockCountCmd struct{}
+type testSessionCmd struct{}
+type testHelpCmd struct {
+	Command *string
+}
 
 // TestUsageFlagStringer tests the stringized output for the UsageFlag type.
 func TestUsageFlagStringer(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		in   dcrjson.UsageFlag
+		in   UsageFlag
 		want string
 	}{
 		{0, "0x0"},
-		{dcrjson.UFWalletOnly, "UFWalletOnly"},
-		{dcrjson.UFWebsocketOnly, "UFWebsocketOnly"},
-		{dcrjson.UFNotification, "UFNotification"},
-		{dcrjson.UFWalletOnly | dcrjson.UFWebsocketOnly,
-			"UFWalletOnly|UFWebsocketOnly"},
-		{dcrjson.UFWalletOnly | dcrjson.UFWebsocketOnly | (1 << 31),
-			"UFWalletOnly|UFWebsocketOnly|0x80000000"},
+		{1, "0x0"}, // was UFWalletOnly
+		{UFWebsocketOnly, "UFWebsocketOnly"},
+		{UFNotification, "UFNotification"},
+		{UFWebsocketOnly | UFNotification, "UFWebsocketOnly|UFNotification"},
+		{1 | UFWebsocketOnly | UFNotification | (1 << 31),
+			"UFWebsocketOnly|UFNotification|0x80000000"},
 	}
 
 	// Detect additional usage flags that don't have the stringer added.
 	numUsageFlags := 0
-	highestUsageFlagBit := dcrjson.TstHighestUsageFlagBit
-	for highestUsageFlagBit > 1 {
+	highestBit := highestUsageFlagBit
+	for highestBit > 1 {
 		numUsageFlags++
-		highestUsageFlagBit >>= 1
+		highestBit >>= 1
 	}
 	if len(tests)-3 != numUsageFlags {
 		t.Errorf("It appears a usage flag was added without adding " +
@@ -63,8 +82,8 @@ func TestRegisterCmdErrors(t *testing.T) {
 		name    string
 		method  string
 		cmdFunc func() interface{}
-		flags   dcrjson.UsageFlag
-		err     dcrjson.Error
+		flags   UsageFlag
+		err     error
 	}{
 		{
 			name:   "duplicate method",
@@ -72,7 +91,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 			cmdFunc: func() interface{} {
 				return struct{}{}
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrDuplicateMethod},
+			err: ErrDuplicateMethod,
 		},
 		{
 			name:   "invalid usage flags",
@@ -80,8 +99,8 @@ func TestRegisterCmdErrors(t *testing.T) {
 			cmdFunc: func() interface{} {
 				return 0
 			},
-			flags: dcrjson.TstHighestUsageFlagBit,
-			err:   dcrjson.Error{Code: dcrjson.ErrInvalidUsageFlags},
+			flags: highestUsageFlagBit,
+			err:   ErrInvalidUsageFlags,
 		},
 		{
 			name:   "invalid type",
@@ -89,7 +108,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 			cmdFunc: func() interface{} {
 				return 0
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrInvalidType},
+			err: ErrInvalidType,
 		},
 		{
 			name:   "invalid type 2",
@@ -97,25 +116,27 @@ func TestRegisterCmdErrors(t *testing.T) {
 			cmdFunc: func() interface{} {
 				return &[]string{}
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrInvalidType},
+			err: ErrInvalidType,
 		},
 		{
 			name:   "embedded field",
 			method: "registertestcmd",
 			cmdFunc: func() interface{} {
+				// nolint: unused
 				type test struct{ int }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrEmbeddedType},
+			err: ErrEmbeddedType,
 		},
 		{
 			name:   "unexported field",
 			method: "registertestcmd",
 			cmdFunc: func() interface{} {
+				// nolint: unused
 				type test struct{ a int }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnexportedField},
+			err: ErrUnexportedField,
 		},
 		{
 			name:   "unsupported field type 1",
@@ -124,7 +145,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A **int }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "unsupported field type 2",
@@ -133,7 +154,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A chan int }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "unsupported field type 3",
@@ -142,7 +163,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A complex64 }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "unsupported field type 4",
@@ -151,7 +172,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A complex128 }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "unsupported field type 5",
@@ -160,7 +181,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A func() }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "unsupported field type 6",
@@ -169,7 +190,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				type test struct{ A interface{} }
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrUnsupportedFieldType},
+			err: ErrUnsupportedFieldType,
 		},
 		{
 			name:   "required after optional",
@@ -181,7 +202,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				}
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrNonOptionalField},
+			err: ErrNonOptionalField,
 		},
 		{
 			name:   "non-optional with default",
@@ -192,7 +213,7 @@ func TestRegisterCmdErrors(t *testing.T) {
 				}
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrNonOptionalDefault},
+			err: ErrNonOptionalDefault,
 		},
 		{
 			name:   "mismatched default",
@@ -203,24 +224,16 @@ func TestRegisterCmdErrors(t *testing.T) {
 				}
 				return (*test)(nil)
 			},
-			err: dcrjson.Error{Code: dcrjson.ErrMismatchedDefault},
+			err: ErrMismatchedDefault,
 		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for i, test := range tests {
-		err := dcrjson.RegisterCmd(test.method, test.cmdFunc(),
-			test.flags)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.err) {
-			t.Errorf("Test #%d (%s) wrong error - got %T, "+
-				"want %T", i, test.name, err, test.err)
-			continue
-		}
-		gotErrorCode := err.(dcrjson.Error).Code
-		if gotErrorCode != test.err.Code {
-			t.Errorf("Test #%d (%s) mismatched error code - got "+
-				"%v, want %v", i, test.name, gotErrorCode,
-				test.err.Code)
+		err := Register(test.method, test.cmdFunc(), test.flags)
+		if !errors.Is(err, test.err) {
+			t.Errorf("Test #%d (%s): mismatched error - got %v, "+
+				"want %v", i, test.name, err, test.err)
 			continue
 		}
 	}
@@ -240,7 +253,7 @@ func TestMustRegisterCmdPanic(t *testing.T) {
 	}()
 
 	// Intentionally try to register an invalid type to force a panic.
-	dcrjson.MustRegisterCmd("panicme", 0, 0)
+	MustRegister("panicme", 0, 0)
 }
 
 // TestRegisteredCmdMethods tests the RegisteredCmdMethods function ensure it
@@ -248,8 +261,8 @@ func TestMustRegisterCmdPanic(t *testing.T) {
 func TestRegisteredCmdMethods(t *testing.T) {
 	t.Parallel()
 
-	// Ensure the registerd methods are returned.
-	methods := dcrjson.RegisteredCmdMethods()
+	// Ensure the registered methods for plain string methods are returned.
+	methods := RegisteredMethods("")
 	if len(methods) == 0 {
 		t.Fatal("RegisteredCmdMethods: no methods")
 	}
@@ -257,7 +270,7 @@ func TestRegisteredCmdMethods(t *testing.T) {
 	// Ensure the returned methods are sorted.
 	sortedMethods := make([]string, len(methods))
 	copy(sortedMethods, methods)
-	sort.Sort(sort.StringSlice(sortedMethods))
+	sort.Strings(sortedMethods)
 	if !reflect.DeepEqual(sortedMethods, methods) {
 		t.Fatal("RegisteredCmdMethods: methods are not sorted")
 	}

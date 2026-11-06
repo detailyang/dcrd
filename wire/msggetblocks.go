@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -39,19 +39,21 @@ type MsgGetBlocks struct {
 
 // AddBlockLocatorHash adds a new block locator hash to the message.
 func (msg *MsgGetBlocks) AddBlockLocatorHash(hash *chainhash.Hash) error {
+	const op = "MsgGetBlocks.AddBlockLocatorHash"
 	if len(msg.BlockLocatorHashes)+1 > MaxBlockLocatorsPerMsg {
-		str := fmt.Sprintf("too many block locator hashes for message [max %v]",
+		msg := fmt.Sprintf("too many block locator hashes for message [max %v]",
 			MaxBlockLocatorsPerMsg)
-		return messageError("MsgGetBlocks.AddBlockLocatorHash", str)
+		return messageError(op, ErrTooManyLocators, msg)
 	}
 
 	msg.BlockLocatorHashes = append(msg.BlockLocatorHashes, hash)
 	return nil
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgGetBlocks) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgGetBlocks.BtcDecode"
 	err := readElement(r, &msg.ProtocolVersion)
 	if err != nil {
 		return err
@@ -63,9 +65,9 @@ func (msg *MsgGetBlocks) BtcDecode(r io.Reader, pver uint32) error {
 		return err
 	}
 	if count > MaxBlockLocatorsPerMsg {
-		str := fmt.Sprintf("too many block locator hashes for message "+
+		msg := fmt.Sprintf("too many block locator hashes for message "+
 			"[count %v, max %v]", count, MaxBlockLocatorsPerMsg)
-		return messageError("MsgGetBlocks.BtcDecode", str)
+		return messageError(op, ErrTooManyLocators, msg)
 	}
 
 	// Create a contiguous slice of hashes to deserialize into in order to
@@ -84,17 +86,18 @@ func (msg *MsgGetBlocks) BtcDecode(r io.Reader, pver uint32) error {
 	return readElement(r, &msg.HashStop)
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgGetBlocks) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgGetBlocks.BtcEncode"
 	count := len(msg.BlockLocatorHashes)
 	if count > MaxBlockLocatorsPerMsg {
-		str := fmt.Sprintf("too many block locator hashes for message "+
+		msg := fmt.Sprintf("too many block locator hashes for message "+
 			"[count %v, max %v]", count, MaxBlockLocatorsPerMsg)
-		return messageError("MsgGetBlocks.BtcEncode", str)
+		return messageError(op, ErrTooManyLocators, msg)
 	}
 
-	err := writeElement(w, msg.ProtocolVersion)
+	err := writeElement(w, &msg.ProtocolVersion)
 	if err != nil {
 		return err
 	}
@@ -123,12 +126,22 @@ func (msg *MsgGetBlocks) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgGetBlocks) MaxPayloadLength(pver uint32) uint32 {
-	// Protocol version 4 bytes + num hashes (varInt) + max block locator
-	// hashes + hash stop.
-	return 4 + MaxVarIntPayload + (MaxBlockLocatorsPerMsg * chainhash.HashSize) + chainhash.HashSize
+	// Protocol version 4 bytes + num hashes (varInt) 3 bytes + max block
+	// locator hashes + hash stop.
+	return 4 + uint32(VarIntSerializeSize(MaxBlockLocatorsPerMsg)) +
+		(MaxBlockLocatorsPerMsg * chainhash.HashSize) + chainhash.HashSize
 }
 
-// NewMsgGetBlocks returns a new decred getblocks message that conforms to the
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgGetBlocks) SerializeSize() int {
+	// Protocol version 4 bytes + num hashes (varInt) + block locator hashes +
+	// hash stop.
+	return 4 + VarIntSerializeSize(uint64(len(msg.BlockLocatorHashes))) +
+		len(msg.BlockLocatorHashes)*chainhash.HashSize + chainhash.HashSize
+}
+
+// NewMsgGetBlocks returns a new Decred getblocks message that conforms to the
 // Message interface using the passed parameters and defaults for the remaining
 // fields.
 func NewMsgGetBlocks(hashStop *chainhash.Hash) *MsgGetBlocks {

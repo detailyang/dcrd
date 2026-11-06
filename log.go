@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2017 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,23 +10,23 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/btclog"
-	"github.com/decred/dcrd/addrmgr"
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/indexers"
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/connmgr"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/mempool"
-	"github.com/decred/dcrd/peer"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/addrmgr/v4"
+	"github.com/decred/dcrd/blockchain/stake/v5"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/dcrd/internal/blockchain"
+	"github.com/decred/dcrd/internal/blockchain/indexers"
+	"github.com/decred/dcrd/internal/connmgr"
+	"github.com/decred/dcrd/internal/fees"
+	"github.com/decred/dcrd/internal/mempool"
+	"github.com/decred/dcrd/internal/mining"
+	"github.com/decred/dcrd/internal/mining/cpuminer"
+	"github.com/decred/dcrd/internal/netsync"
+	"github.com/decred/dcrd/internal/rpcserver"
+	"github.com/decred/dcrd/mixing/mixpool"
+	"github.com/decred/dcrd/peer/v4"
+	"github.com/decred/dcrd/txscript/v4"
+	"github.com/decred/slog"
 	"github.com/jrick/logrotate/rotator"
-)
-
-const (
-	// maxRejectReasonLen is the maximum length of a sanitized reject reason
-	// that will be logged.
-	maxRejectReasonLen = 250
 )
 
 // logWriter implements an io.Writer that outputs to both standard output and
@@ -41,7 +41,7 @@ func (logWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Loggers per subsystem.  A single backend logger is created and all subsytem
+// Loggers per subsystem.  A single backend logger is created and all subsystem
 // loggers created from it will write to the backend.  When adding new
 // subsystems, add the subsystem logger variable here and to the
 // subsystemLoggers map.
@@ -53,74 +53,88 @@ var (
 	// backendLog is the logging backend used to create all subsystem loggers.
 	// The backend must not be used before the log rotator has been initialized,
 	// or data races and/or nil pointer dereferences will occur.
-	backendLog = btclog.NewBackend(logWriter{})
+	backendLog = slog.NewBackend(logWriter{})
 
 	// logRotator is one of the logging outputs.  It should be closed on
 	// application shutdown.
 	logRotator *rotator.Rotator
 
-	adxrLog = backendLog.Logger("ADXR")
 	amgrLog = backendLog.Logger("AMGR")
-	cmgrLog = backendLog.Logger("CMGR")
 	bcdbLog = backendLog.Logger("BCDB")
-	bmgrLog = backendLog.Logger("BMGR")
-	dcrdLog = backendLog.Logger("DCRD")
 	chanLog = backendLog.Logger("CHAN")
+	cmgrLog = backendLog.Logger("CMGR")
+	dcrdLog = backendLog.Logger("DCRD")
 	discLog = backendLog.Logger("DISC")
+	feesLog = backendLog.Logger("FEES")
 	indxLog = backendLog.Logger("INDX")
 	minrLog = backendLog.Logger("MINR")
+	mixpLog = backendLog.Logger("MIXP")
 	peerLog = backendLog.Logger("PEER")
 	rpcsLog = backendLog.Logger("RPCS")
 	scrpLog = backendLog.Logger("SCRP")
 	srvrLog = backendLog.Logger("SRVR")
 	stkeLog = backendLog.Logger("STKE")
+	syncLog = backendLog.Logger("SYNC")
 	txmpLog = backendLog.Logger("TXMP")
+	trsyLog = backendLog.Logger("TRSY")
 )
 
 // Initialize package-global logger variables.
 func init() {
 	addrmgr.UseLogger(amgrLog)
+	blockchain.UseLogger(chanLog)
+	blockchain.UseTreasuryLogger(trsyLog)
 	connmgr.UseLogger(cmgrLog)
 	database.UseLogger(bcdbLog)
-	blockchain.UseLogger(chanLog)
+	fees.UseLogger(feesLog)
 	indexers.UseLogger(indxLog)
-	peer.UseLogger(peerLog)
-	txscript.UseLogger(scrpLog)
-	stake.UseLogger(stkeLog)
 	mempool.UseLogger(txmpLog)
+	mining.UseLogger(minrLog)
+	mixpool.UseLogger(mixpLog)
+	cpuminer.UseLogger(minrLog)
+	peer.UseLogger(peerLog)
+	rpcserver.UseLogger(rpcsLog)
+	stake.UseLogger(stkeLog)
+	netsync.UseLogger(syncLog)
+	txscript.UseLogger(scrpLog)
 }
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
-var subsystemLoggers = map[string]btclog.Logger{
-	"ADXR": adxrLog,
+var subsystemLoggers = map[string]slog.Logger{
 	"AMGR": amgrLog,
-	"CMGR": cmgrLog,
 	"BCDB": bcdbLog,
-	"BMGR": bmgrLog,
-	"DCRD": dcrdLog,
 	"CHAN": chanLog,
+	"CMGR": cmgrLog,
+	"DCRD": dcrdLog,
 	"DISC": discLog,
+	"FEES": feesLog,
 	"INDX": indxLog,
 	"MINR": minrLog,
+	"MIXP": mixpLog,
 	"PEER": peerLog,
 	"RPCS": rpcsLog,
 	"SCRP": scrpLog,
 	"SRVR": srvrLog,
 	"STKE": stkeLog,
+	"SYNC": syncLog,
 	"TXMP": txmpLog,
+	"TRSY": trsyLog,
 }
 
 // initLogRotator initializes the logging rotater to write logs to logFile and
-// create roll files in the same directory.  It must be called before the
-// package-global log rotater variables are used.
-func initLogRotator(logFile string) {
+// create roll files in the same directory.  logSize is the size in KiB after
+// which a log file will be rotated and compressed.
+//
+// This function must be called before the package-global log rotater variables
+// are used.
+func initLogRotator(logFile string, logSize int64) {
 	logDir, _ := filepath.Split(logFile)
 	err := os.MkdirAll(logDir, 0700)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create log directory: %v\n", err)
 		os.Exit(1)
 	}
-	r, err := rotator.New(logFile, 10*1024, false, 3)
+	r, err := rotator.New(logFile, logSize, false, 3)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create file rotator: %v\n", err)
 		os.Exit(1)
@@ -140,7 +154,7 @@ func setLogLevel(subsystemID string, logLevel string) {
 	}
 
 	// Defaults to info if the log level is invalid.
-	level, _ := btclog.LevelFromString(logLevel)
+	level, _ := slog.LevelFromString(logLevel)
 	logger.SetLevel(level)
 }
 
@@ -164,12 +178,26 @@ func directionString(inbound bool) string {
 	return "outbound"
 }
 
-// fatalf logs a string, then cleanly exits.
-func fatalf(str string) {
-	dcrdLog.Errorf("Unable to create profiler: %v", str)
-	os.Stdout.Sync()
-	if logRotator != nil {
-		logRotator.Close()
+// pickNoun returns the singular or plural form of a noun depending
+// on the count n.
+func pickNoun(n uint64, singular, plural string) string {
+	if n == 1 {
+		return singular
 	}
-	os.Exit(1)
+	return plural
+}
+
+// humanizeBytes returns the provided number of bytes in humanized form with IEC
+// units (aka binary prefixes such as KiB and MiB).
+func humanizeBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }

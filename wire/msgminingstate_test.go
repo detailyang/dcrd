@@ -1,4 +1,7 @@
-// msgminingstate_test.go
+// Copyright (c) 2019-2026 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 package wire
 
 import (
@@ -10,6 +13,48 @@ import (
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
 )
+
+func TestMiningState(t *testing.T) {
+	pver := ProtocolVersion
+
+	// Ensure the command is expected value.
+	wantCmd := "miningstate"
+	msg := NewMsgMiningState()
+	if cmd := msg.Command(); cmd != wantCmd {
+		t.Errorf("NewMsgMemPool: wrong command - got %v want %v",
+			cmd, wantCmd)
+	}
+
+	// Ensure max payload is expected value.
+	wantPayload := uint32(1546)
+	maxPayload := msg.MaxPayloadLength(pver)
+	if maxPayload != wantPayload {
+		t.Errorf("MaxPayloadLength: wrong max payload length for "+
+			"protocol version %d - got %v, want %v", pver,
+			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
+	}
+
+	// Test encode with latest protocol version.
+	var buf bytes.Buffer
+	err := msg.BtcEncode(&buf, pver)
+	if err != nil {
+		t.Errorf("encode of MsgMiningState failed %v err <%v>", msg, err)
+	}
+
+	// Test decode with latest protocol version.
+	readmsg := NewMsgMiningState()
+	err = readmsg.BtcDecode(&buf, pver)
+	if err != nil {
+		t.Errorf("decode of MsgMiningState failed [%v] err <%v>", buf, err)
+	}
+}
 
 // TestMiningStateWire tests the MsgMiningState wire encode and decode for a sample
 // message containing a fake block header and some fake vote hashes.
@@ -23,7 +68,7 @@ func TestMiningStateWire(t *testing.T) {
 		"433221144332211443322114433221144332211")
 	err := sampleMSMsg.AddBlockHash(fakeBlock)
 	if err != nil {
-		t.Errorf("unexpected error for AddBlockHash: %v", err.Error())
+		t.Errorf("unexpected error for AddBlockHash: %v", err)
 	}
 
 	fakeVote1, _ := chainhash.NewHashFromStr("2222111122221111222211112" +
@@ -34,15 +79,15 @@ func TestMiningStateWire(t *testing.T) {
 		"666555566665555666655556666555566665555")
 	err = sampleMSMsg.AddVoteHash(fakeVote1)
 	if err != nil {
-		t.Errorf("unexpected error for AddVoteHash 1: %v", err.Error())
+		t.Errorf("unexpected error for AddVoteHash 1: %v", err)
 	}
 	err = sampleMSMsg.AddVoteHash(fakeVote2)
 	if err != nil {
-		t.Errorf("unexpected error for AddVoteHash 2: %v", err.Error())
+		t.Errorf("unexpected error for AddVoteHash 2: %v", err)
 	}
 	err = sampleMSMsg.AddVoteHash(fakeVote3)
 	if err != nil {
-		t.Errorf("unexpected error for AddVoteHash 3: %v", err.Error())
+		t.Errorf("unexpected error for AddVoteHash 3: %v", err)
 	}
 
 	sampleMSMsgEncoded := []byte{
@@ -96,6 +141,14 @@ func TestMiningStateWire(t *testing.T) {
 			t.Errorf("BtcEncode #%d\n got: %s want: %s", i,
 				spew.Sdump(buf.Bytes()), spew.Sdump(test.buf))
 			continue
+		}
+
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.in.SerializeSize()
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
 		}
 
 		// Decode the message from wire format.

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -14,10 +14,12 @@ import (
 
 const (
 	// MaxInvPerMsg is the maximum number of inventory vectors that can be in a
-	// single decred inv message.
+	// single Decred inv message.
 	MaxInvPerMsg = 50000
 
-	// Maximum payload size for an inventory vector.
+	// maxInvVectPayload is the serialized size of an inventory vector: a 4-byte
+	// type followed by a fixed-size hash.  Both fields are fixed width, so this
+	// is the exact payload size, not an upper bound.
 	maxInvVectPayload = 4 + chainhash.HashSize
 )
 
@@ -30,6 +32,7 @@ const (
 	InvTypeTx            InvType = 1
 	InvTypeBlock         InvType = 2
 	InvTypeFilteredBlock InvType = 3
+	InvTypeMix           InvType = 4
 )
 
 // Map of service flags back to their constant names for pretty printing.
@@ -38,6 +41,7 @@ var ivStrings = map[InvType]string{
 	InvTypeTx:            "MSG_TX",
 	InvTypeBlock:         "MSG_BLOCK",
 	InvTypeFilteredBlock: "MSG_FILTERED_BLOCK",
+	InvTypeMix:           "MSG_MIX",
 }
 
 // String returns the InvType in human-readable form.
@@ -49,7 +53,7 @@ func (invtype InvType) String() string {
 	return fmt.Sprintf("Unknown InvType (%d)", uint32(invtype))
 }
 
-// InvVect defines a decred inventory vector which is used to describe data,
+// InvVect defines a Decred inventory vector which is used to describe data,
 // as specified by the Type field, that a peer wants, has, or does not have to
 // another peer.
 type InvVect struct {
@@ -73,5 +77,5 @@ func readInvVect(r io.Reader, pver uint32, iv *InvVect) error {
 
 // writeInvVect serializes an InvVect to w depending on the protocol version.
 func writeInvVect(w io.Writer, pver uint32, iv *InvVect) error {
-	return writeElements(w, iv.Type, &iv.Hash)
+	return writeElements(w, &iv.Type, &iv.Hash)
 }

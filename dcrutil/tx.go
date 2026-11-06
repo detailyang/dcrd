@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -79,6 +79,16 @@ func (t *Tx) SetTree(tree int8) {
 	t.txTree = tree
 }
 
+// Version returns the transaction version.
+func (t *Tx) Version() uint16 {
+	return t.msgTx.Version
+}
+
+// SetVersion sets the version of the transaction within a block.
+func (t *Tx) SetVersion(version uint16) {
+	t.msgTx.Version = version
+}
+
 // NewTx returns a new instance of a transaction given an underlying
 // wire.MsgTx.  See Tx.
 func NewTx(msgTx *wire.MsgTx) *Tx {
@@ -95,12 +105,11 @@ func NewTx(msgTx *wire.MsgTx) *Tx {
 // so that there are new memory allocations, in case you were to somewhere
 // else modify the data assigned to these pointers.
 func NewTxDeep(msgTx *wire.MsgTx) *Tx {
-	txIns := make([]*wire.TxIn, len(msgTx.TxIn), len(msgTx.TxIn))
-	txOuts := make([]*wire.TxOut, len(msgTx.TxOut), len(msgTx.TxOut))
+	txIns := make([]*wire.TxIn, len(msgTx.TxIn))
+	txOuts := make([]*wire.TxOut, len(msgTx.TxOut))
 
 	for i, txin := range msgTx.TxIn {
-		sigScript := make([]byte, len(txin.SignatureScript),
-			len(txin.SignatureScript))
+		sigScript := make([]byte, len(txin.SignatureScript))
 		copy(sigScript[:], txin.SignatureScript[:])
 
 		txIns[i] = &wire.TxIn{
@@ -118,8 +127,7 @@ func NewTxDeep(msgTx *wire.MsgTx) *Tx {
 	}
 
 	for i, txout := range msgTx.TxOut {
-		pkScript := make([]byte, len(txout.PkScript),
-			len(txout.PkScript))
+		pkScript := make([]byte, len(txout.PkScript))
 		copy(pkScript[:], txout.PkScript[:])
 
 		txOuts[i] = &wire.TxOut{
@@ -151,48 +159,51 @@ func NewTxDeep(msgTx *wire.MsgTx) *Tx {
 // pointers to the TxOuts while replacing the old pointers to the TxIns with
 // deep copies. This is to prevent races when the fraud proofs for the
 // transactions are set by the miner.
-func NewTxDeepTxIns(msgTx *wire.MsgTx) *Tx {
-	if msgTx == nil {
+func NewTxDeepTxIns(tx *Tx) *Tx {
+	if tx == nil {
 		return nil
 	}
 
-	newMsgTx := new(wire.MsgTx)
+	msgTx := tx.msgTx
+	txIns := make([]*wire.TxIn, len(msgTx.TxIn))
+	txOuts := make([]*wire.TxOut, len(msgTx.TxOut))
 
-	// Copy the fixed fields.
-	newMsgTx.Version = msgTx.Version
-	newMsgTx.LockTime = msgTx.LockTime
-	newMsgTx.Expiry = msgTx.Expiry
+	for i, txin := range msgTx.TxIn {
+		sigScript := make([]byte, len(txin.SignatureScript))
+		copy(sigScript[:], txin.SignatureScript[:])
 
-	// Copy the TxIns deeply.
-	for _, txIn := range msgTx.TxIn {
-		sigScrLen := len(txIn.SignatureScript)
-		sigScrCopy := make([]byte, sigScrLen, sigScrLen)
-
-		txInCopy := new(wire.TxIn)
-		txInCopy.PreviousOutPoint.Hash = txIn.PreviousOutPoint.Hash
-		txInCopy.PreviousOutPoint.Index = txIn.PreviousOutPoint.Index
-		txInCopy.PreviousOutPoint.Tree = txIn.PreviousOutPoint.Tree
-
-		txInCopy.Sequence = txIn.Sequence
-		txInCopy.ValueIn = txIn.ValueIn
-		txInCopy.BlockHeight = txIn.BlockHeight
-		txInCopy.BlockIndex = txIn.BlockIndex
-
-		txInCopy.SignatureScript = sigScrCopy
-
-		newMsgTx.AddTxIn(txIn)
+		txIns[i] = &wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  txin.PreviousOutPoint.Hash,
+				Index: txin.PreviousOutPoint.Index,
+				Tree:  txin.PreviousOutPoint.Tree,
+			},
+			Sequence:        txin.Sequence,
+			ValueIn:         txin.ValueIn,
+			BlockHeight:     txin.BlockHeight,
+			BlockIndex:      txin.BlockIndex,
+			SignatureScript: sigScript,
+		}
 	}
 
 	// Shallow copy the TxOuts.
-	for _, txOut := range msgTx.TxOut {
-		newMsgTx.AddTxOut(txOut)
+	copy(txOuts, msgTx.TxOut)
+
+	newTxMsg := &wire.MsgTx{
+		CachedHash: nil,
+		SerType:    msgTx.SerType,
+		Version:    msgTx.Version,
+		TxIn:       txIns,
+		TxOut:      txOuts,
+		LockTime:   msgTx.LockTime,
+		Expiry:     msgTx.Expiry,
 	}
 
 	return &Tx{
-		hash:    msgTx.TxHash(),
-		msgTx:   msgTx,
-		txTree:  wire.TxTreeUnknown,
-		txIndex: TxIndexUnknown,
+		hash:    newTxMsg.TxHash(),
+		msgTx:   newTxMsg,
+		txTree:  tx.txTree,
+		txIndex: tx.txIndex,
 	}
 }
 

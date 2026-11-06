@@ -1,24 +1,52 @@
-// Copyright (c) 2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2017 The btcsuite developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package txscript
 
+import (
+	"fmt"
+)
+
 const (
 	maxInt32 = 1<<31 - 1
 	minInt32 = -1 << 31
 
-	// mathOpCodeMaxScriptNumLen is the maximum number of bytes data being
+	// MathOpCodeMaxScriptNumLen is the maximum number of bytes data being
 	// interpreted as an integer may be for the majority of op codes.
-	mathOpCodeMaxScriptNumLen = 4
+	MathOpCodeMaxScriptNumLen = 4
+
+	// CltvMaxScriptNumLen is the maximum number of bytes data being interpreted
+	// as an integer may be for by-time and by-height locks as interpreted by
+	// CHECKLOCKTIMEVERIFY.
+	//
+	// The value comes from the fact that the current transaction locktime
+	// is a uint32 resulting in a maximum locktime of 2^32-1 (the year
+	// 2106).  However, script numbers are signed and therefore a standard
+	// 4-byte ScriptNum would only support up to a maximum of 2^31-1 (the
+	// year 2038).  Thus, a 5-byte ScriptNum is needed since it will support
+	// up to 2^39-1 which allows dates beyond the current locktime limit.
+	CltvMaxScriptNumLen = 5
+
+	// CsvMaxScriptNumLen is the maximum number of bytes data being interpreted
+	// as an integer may be for by-time and by-height locks as interpreted by
+	// CHECKSEQUENCEVERIFY.
+	//
+	// The value comes from the fact that the current transaction sequence
+	// is a uint32 resulting in a maximum sequence of 2^32-1.  However,
+	// ScriptNums are signed and therefore a standard 4-byte ScriptNum would
+	// only support up to a maximum of 2^31-1.  Thus, a 5-byte ScriptNum is
+	// needed since it will support up to 2^39-1 which allows sequences
+	// beyond the current sequence limit.
+	CsvMaxScriptNumLen = 5
 
 	// altSigSuitesMaxscriptNumLen is the maximum number of bytes for the
-	// type of alternative signature suite
+	// type of alternative signature suite.
 	altSigSuitesMaxscriptNumLen = 1
 )
 
-// scriptNum represents a numeric value used in the scripting engine with
+// ScriptNum represents a numeric value used in the scripting engine with
 // special handling to deal with the subtle semantics required by consensus.
 //
 // All numbers are stored on the data and alternate stacks encoded as little
@@ -40,11 +68,11 @@ const (
 // method to get the serialized representation (including values that overflow).
 //
 // Then, whenever data is interpreted as an integer, it is converted to this
-// type by using the makeScriptNum function which will return an error if the
+// type by using the MakeScriptNum function which will return an error if the
 // number is out of range or not minimally encoded depending on parameters.
 // Since all numeric opcodes involve pulling data from the stack and
 // interpreting it as an integer, it provides the required behavior.
-type scriptNum int64
+type ScriptNum int64
 
 // checkMinimalDataEncoding returns whether or not the passed byte array adheres
 // to the minimal encoding requirements.
@@ -66,7 +94,9 @@ func checkMinimalDataEncoding(v []byte) error {
 		// is +-255, which encode to 0xff00 and 0xff80 respectively.
 		// (big-endian).
 		if len(v) == 1 || v[len(v)-2]&0x80 == 0 {
-			return ErrStackMinimalData
+			str := fmt.Sprintf("numeric value encoded as %x is "+
+				"not minimally encoded", v)
+			return scriptError(ErrMinimalData, str)
 		}
 	}
 
@@ -76,19 +106,20 @@ func checkMinimalDataEncoding(v []byte) error {
 // Bytes returns the number serialized as a little endian with a sign bit.
 //
 // Example encodings:
-//       127 -> [0x7f]
-//      -127 -> [0xff]
-//       128 -> [0x80 0x00]
-//      -128 -> [0x80 0x80]
-//       129 -> [0x81 0x00]
-//      -129 -> [0x81 0x80]
-//       256 -> [0x00 0x01]
-//      -256 -> [0x00 0x81]
-//     32767 -> [0xff 0x7f]
-//    -32767 -> [0xff 0xff]
-//     32768 -> [0x00 0x80 0x00]
-//    -32768 -> [0x00 0x80 0x80]
-func (n scriptNum) Bytes() []byte {
+//
+//	   127 -> [0x7f]
+//	  -127 -> [0xff]
+//	   128 -> [0x80 0x00]
+//	  -128 -> [0x80 0x80]
+//	   129 -> [0x81 0x00]
+//	  -129 -> [0x81 0x80]
+//	   256 -> [0x00 0x01]
+//	  -256 -> [0x00 0x81]
+//	 32767 -> [0xff 0x7f]
+//	-32767 -> [0xff 0xff]
+//	 32768 -> [0x00 0x80 0x00]
+//	-32768 -> [0x00 0x80 0x80]
+func (n ScriptNum) Bytes() []byte {
 	// Zero encodes as an empty byte slice.
 	if n == 0 {
 		return nil
@@ -96,17 +127,18 @@ func (n scriptNum) Bytes() []byte {
 
 	// Take the absolute value and keep track of whether it was originally
 	// negative.
+	nu64 := uint64(n)
 	isNegative := n < 0
 	if isNegative {
-		n = -n
+		nu64 = uint64(-n)
 	}
 
 	// Encode to little endian.  The maximum number of encoded bytes is 9
 	// (8 bytes for max int64 plus a potential byte for sign extension).
 	result := make([]byte, 0, 9)
-	for n > 0 {
-		result = append(result, byte(n&0xff))
-		n >>= 8
+	for nu64 > 0 {
+		result = append(result, byte(nu64&0xff))
+		nu64 >>= 8
 	}
 
 	// When the most significant byte already has the high bit set, an
@@ -122,7 +154,6 @@ func (n scriptNum) Bytes() []byte {
 			extraByte = 0x80
 		}
 		result = append(result, extraByte)
-
 	} else if isNegative {
 		result[len(result)-1] |= 0x80
 	}
@@ -138,12 +169,12 @@ func (n scriptNum) Bytes() []byte {
 // provide this behavior.
 //
 // In practice, for most opcodes, the number should never be out of range since
-// it will have been created with makeScriptNum using the defaultScriptLen
+// it will have been created with MakeScriptNum using the defaultScriptLen
 // value, which rejects them.  In case something in the future ends up calling
 // this function against the result of some arithmetic, which IS allowed to be
 // out of range before being reinterpreted as an integer, this will provide the
 // correct behavior.
-func (n scriptNum) Int32() int32 {
+func (n ScriptNum) Int32() int32 {
 	if n > maxInt32 {
 		return maxInt32
 	}
@@ -155,7 +186,7 @@ func (n scriptNum) Int32() int32 {
 	return int32(n)
 }
 
-// makeScriptNum interprets the passed serialized bytes as an encoded integer
+// MakeScriptNum interprets the passed serialized bytes as an encoded integer
 // and returns the result as a script number.
 //
 // Since the consensus rules dictate that serialized bytes interpreted as ints
@@ -166,33 +197,34 @@ func (n scriptNum) Int32() int32 {
 // bytes and therefore will pass that value to this function resulting in an
 // allowed range of [-2^31 + 1, 2^31 - 1].
 //
-// The requireMinimal flag causes an error to be returned if additional checks
-// on the encoding determine it is not represented with the smallest possible
-// number of bytes or is the negative 0 encoding, [0x80].  For example, consider
-// the number 127.  It could be encoded as [0x7f], [0x7f 0x00],
-// [0x7f 0x00 0x00 ...], etc.  All forms except [0x7f] will return an error with
-// requireMinimal enabled.
+// An error will be returned if the encoding is not represented with the
+// smallest possible number of bytes or is the negative 0 encoding, [0x80].  For
+// example, consider the number 127.  It could be encoded as [0x7f], [0x7f
+// 0x00], [0x7f 0x00 0x00 ...], etc.  All forms except [0x7f] will return an
+// error.
 //
 // The scriptNumLen is the maximum number of bytes the encoded value can be
-// before an ErrStackNumberTooBig is returned.  This effectively limits the
-// range of allowed values.
-// WARNING:  Great care should be taken if passing a value larger than
+// before an ErrNumOutOfRange is returned.  This effectively limits the range of
+// allowed values.
+//
+// WARNING: Great care should be taken if passing a value larger than
 // defaultScriptNumLen, which could lead to addition and multiplication
 // overflows.
 //
 // See the Bytes function documentation for example encodings.
-func makeScriptNum(v []byte, requireMinimal bool, scriptNumLen int) (scriptNum, error) {
+func MakeScriptNum(v []byte, scriptNumLen int) (ScriptNum, error) {
 	// Interpreting data requires that it is not larger than
-	// the the passed scriptNumLen value.
+	// the passed scriptNumLen value.
 	if len(v) > scriptNumLen {
-		return 0, ErrStackNumberTooBig
+		str := fmt.Sprintf("numeric value encoded as %x is %d bytes "+
+			"which exceeds the max allowed of %d", v, len(v),
+			scriptNumLen)
+		return 0, scriptError(ErrNumOutOfRange, str)
 	}
 
-	// Enforce minimal encoded if requested.
-	if requireMinimal {
-		if err := checkMinimalDataEncoding(v); err != nil {
-			return 0, err
-		}
+	// Enforce minimal encoding.
+	if err := checkMinimalDataEncoding(v); err != nil {
+		return 0, err
 	}
 
 	// Zero is encoded as an empty byte slice.
@@ -214,8 +246,8 @@ func makeScriptNum(v []byte, requireMinimal bool, scriptNumLen int) (scriptNum, 
 		// above, so uint8 is enough to cover the max possible shift
 		// value of 24.
 		result &= ^(int64(0x80) << uint8(8*(len(v)-1)))
-		return scriptNum(-result), nil
+		return ScriptNum(-result), nil
 	}
 
-	return scriptNum(result), nil
+	return ScriptNum(result), nil
 }

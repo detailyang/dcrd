@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	// ptrSize is the number of bytes in a native pointer
+	// ptrSize is the number of bytes in a native pointer.
 	ptrSize = 4 << (^uintptr(0) >> 63)
 
 	// staticDepth is the size of the static array to use for keeping track
@@ -61,7 +61,7 @@ type treapNode struct {
 // nodeSize returns the number of bytes the specified node occupies including
 // the struct fields and the contents of the key and value.
 func nodeSize(node *treapNode) uint64 {
-	return nodeFieldsSize + uint64(len(node.key)+nodeValueSize)
+	return nodeFieldsSize + uint64(len(node.key)) + nodeValueSize
 }
 
 // newTreapNode returns a new node from the given key, value, and priority.  The
@@ -88,20 +88,19 @@ func (t *treapNode) rightSize() uint32 {
 	return 0
 }
 
-// getByIndex returns the (Key, *Value) at the given position and panics if idx is
-// out of bounds.
+// getByIndex returns the (Key, *Value) at the given position and panics if idx
+// is out of bounds.
 func (t *treapNode) getByIndex(idx int) (Key, *Value) {
-	if idx < 0 || idx > int(t.size) {
-		panic(fmt.Sprintf("getByIndex(%v) index out of bounds", idx))
+	if idx < 0 || idx >= int(t.size) {
+		panic(fmt.Sprintf("getByIndex(%d) index out of bounds", idx))
 	}
 	node := t
 	for {
 		if node.left == nil {
 			if idx == 0 {
 				return node.key, node.value
-			} else {
-				node, idx = node.right, idx-1
 			}
+			node, idx = node.right, idx-1
 		} else {
 			if idx < int(node.left.size) {
 				node = node.left
@@ -178,7 +177,7 @@ func (s *parentStack) Push(node *treapNode) {
 	// This approach is used over append because reslicing the slice to pop
 	// the item causes the compiler to make unneeded allocations.  Also,
 	// since the max number of items is related to the tree depth which
-	// requires expontentially more items to increase, only increase the cap
+	// requires exponentially more items to increase, only increase the cap
 	// one item at a time.  This is more intelligent than the generic append
 	// expansion algorithm which often doubles the cap.
 	index := s.index - staticDepth

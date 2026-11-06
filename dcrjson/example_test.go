@@ -1,15 +1,13 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package dcrjson_test
+package dcrjson
 
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/decred/dcrd/dcrjson"
 )
 
 // This example demonstrates how to create and marshal a command into a JSON-RPC
@@ -18,17 +16,19 @@ func ExampleMarshalCmd() {
 	// Create a new getblock command.  Notice the nil parameter indicates
 	// to use the default parameter for that fields.  This is a common
 	// pattern used in all of the New<Foo>Cmd functions in this package for
-	// optional fields.  Also, notice the call to dcrjson.Bool which is a
+	// optional fields.  Also, notice the call to Bool which is a
 	// convenience function for creating a pointer out of a primitive for
 	// optional parameters.
+	//
+	// testGetBlockCmd was registered at init by the test.
 	blockHash := "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-	gbCmd := dcrjson.NewGetBlockCmd(blockHash, dcrjson.Bool(false), nil)
+	gbCmd := &testGetBlockCmd{Hash: blockHash, Verbose: Bool(false), VerboseTx: nil}
 
 	// Marshal the command to the format suitable for sending to the RPC
 	// server.  Typically the client would increment the id here which is
 	// request so the response can be identified.
 	id := 1
-	marshalledBytes, err := dcrjson.MarshalCmd(id, gbCmd)
+	marshalledBytes, err := MarshalCmd("1.0", id, gbCmd)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -43,14 +43,14 @@ func ExampleMarshalCmd() {
 }
 
 // This example demonstrates how to unmarshal a JSON-RPC request and then
-// unmarshal the concrete request into a concrete command.
-func ExampleUnmarshalCmd() {
+// parse the parameters into a concrete type.
+func ExampleParseParams() {
 	// Ordinarily this would be read from the wire, but for this example,
 	// it is hard coded here for clarity.
 	data := []byte(`{"jsonrpc":"1.0","method":"getblock","params":["000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",false],"id":1}`)
 
 	// Unmarshal the raw bytes from the wire into a JSON-RPC request.
-	var request dcrjson.Request
+	var request Request
 	if err := json.Unmarshal(data, &request); err != nil {
 		fmt.Println(err)
 		return
@@ -69,17 +69,17 @@ func ExampleUnmarshalCmd() {
 		return
 	}
 
-	// Unmarshal the request into a concrete command.
-	cmd, err := dcrjson.UnmarshalCmd(&request)
+	// Unmarshal the request into concrete params.
+	params, err := ParseParams(request.Method, request.Params)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	// Type assert the command to the appropriate type.
-	gbCmd, ok := cmd.(*dcrjson.GetBlockCmd)
+	// Type assert the params to the appropriate type.
+	gbCmd, ok := params.(*testGetBlockCmd)
 	if !ok {
-		fmt.Printf("Incorrect command type: %T\n", cmd)
+		fmt.Printf("Incorrect params type: %T\n", params)
 		return
 	}
 
@@ -98,7 +98,7 @@ func ExampleUnmarshalCmd() {
 func ExampleMarshalResponse() {
 	// Marshal a new JSON-RPC response.  For example, this is a response
 	// to a getblockheight request.
-	marshalledBytes, err := dcrjson.MarshalResponse(1, 350001, nil)
+	marshalledBytes, err := MarshalResponse("1.0", 1, 350001, nil)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -110,7 +110,7 @@ func ExampleMarshalResponse() {
 	fmt.Printf("%s\n", marshalledBytes)
 
 	// Output:
-	// {"result":350001,"error":null,"id":1}
+	// {"jsonrpc":"1.0","result":350001,"error":null,"id":1}
 }
 
 // This example demonstrates how to unmarshal a JSON-RPC response and then
@@ -122,7 +122,7 @@ func Example_unmarshalResponse() {
 	data := []byte(`{"result":350001,"error":null,"id":1}`)
 
 	// Unmarshal the raw bytes from the wire into a JSON-RPC response.
-	var response dcrjson.Response
+	var response Response
 	if err := json.Unmarshal(data, &response); err != nil {
 		fmt.Println("Malformed JSON-RPC response:", err)
 		return

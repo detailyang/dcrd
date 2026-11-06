@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,7 +8,7 @@ package database
 import (
 	"fmt"
 
-	"github.com/btcsuite/btclog"
+	"github.com/decred/slog"
 )
 
 // Driver defines a structure for backend drivers to use when they register
@@ -29,20 +29,20 @@ type Driver struct {
 	Open func(args ...interface{}) (DB, error)
 
 	// UseLogger uses a specified Logger to output package logging info.
-	UseLogger func(logger btclog.Logger)
+	UseLogger func(logger slog.Logger)
 }
 
-// driverList holds all of the registered database backends.
+// drivers holds all of the registered database backends.
 var drivers = make(map[string]*Driver)
 
 // RegisterDriver adds a backend database driver to available interfaces.
-// ErrDbTypeRegistered will be retruned if the database type for the driver has
+// ErrDbTypeRegistered will be returned if the database type for the driver has
 // already been registered.
 func RegisterDriver(driver Driver) error {
 	if _, exists := drivers[driver.DbType]; exists {
 		str := fmt.Sprintf("driver %q is already registered",
 			driver.DbType)
-		return makeError(ErrDbTypeRegistered, str, nil)
+		return makeError(ErrDbTypeRegistered, str)
 	}
 
 	drivers[driver.DbType] = &driver
@@ -63,12 +63,12 @@ func SupportedDrivers() []string {
 // arguments are specific to the database type driver.  See the documentation
 // for the database driver for further details.
 //
-// ErrDbUnknownType will be returned if the the database type is not registered.
+// ErrDbUnknownType will be returned if the database type is not registered.
 func Create(dbType string, args ...interface{}) (DB, error) {
 	drv, exists := drivers[dbType]
 	if !exists {
 		str := fmt.Sprintf("driver %q is not registered", dbType)
-		return nil, makeError(ErrDbUnknownType, str, nil)
+		return nil, makeError(ErrDbUnknownType, str)
 	}
 
 	return drv.Create(args...)
@@ -78,12 +78,12 @@ func Create(dbType string, args ...interface{}) (DB, error) {
 // specific to the database type driver.  See the documentation for the database
 // driver for further details.
 //
-// ErrDbUnknownType will be returned if the the database type is not registered.
+// ErrDbUnknownType will be returned if the database type is not registered.
 func Open(dbType string, args ...interface{}) (DB, error) {
 	drv, exists := drivers[dbType]
 	if !exists {
 		str := fmt.Sprintf("driver %q is not registered", dbType)
-		return nil, makeError(ErrDbUnknownType, str, nil)
+		return nil, makeError(ErrDbUnknownType, str)
 	}
 
 	return drv.Open(args...)

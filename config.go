@@ -1,17 +1,21 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -20,154 +24,213 @@ import (
 	"strings"
 	"time"
 
-	"github.com/btcsuite/btclog"
-	"github.com/btcsuite/go-socks/socks"
-	"github.com/decred/dcrd/connmgr"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/mempool"
+	"github.com/decred/dcrd/addrmgr/v4"
+	"github.com/decred/dcrd/database/v3"
+	_ "github.com/decred/dcrd/database/v3/ffldb"
+	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/internal/mempool"
+	"github.com/decred/dcrd/internal/version"
+	"github.com/decred/dcrd/rpc/jsonrpc/types/v5"
 	"github.com/decred/dcrd/sampleconfig"
+	"github.com/decred/dcrd/txscript/v4/stdaddr"
+	"github.com/decred/go-socks/socks"
+	"github.com/decred/slog"
 	flags "github.com/jessevdk/go-flags"
 )
 
 const (
-	defaultConfigFilename        = "dcrd.conf"
-	defaultDataDirname           = "data"
-	defaultLogLevel              = "info"
-	defaultLogDirname            = "logs"
-	defaultLogFilename           = "dcrd.log"
-	defaultMaxPeers              = 125
-	defaultBanDuration           = time.Hour * 24
-	defaultBanThreshold          = 100
-	defaultMaxRPCClients         = 10
-	defaultMaxRPCWebsockets      = 25
-	defaultMaxRPCConcurrentReqs  = 20
-	defaultDbType                = "ffldb"
-	defaultFreeTxRelayLimit      = 15.0
-	defaultBlockMinSize          = 0
-	defaultBlockMaxSize          = 375000
-	blockMaxSizeMin              = 1000
-	defaultAddrIndex             = false
-	defaultGenerate              = false
-	defaultNoMiningStateSync     = false
+	// Defaults for general application behavior options.
+	defaultConfigFilename   = "dcrd.conf"
+	defaultDataDirname      = "data"
+	defaultLogDirname       = "logs"
+	defaultLogFilename      = "dcrd.log"
+	defaultLogSize          = "10M"
+	defaultDbType           = "ffldb"
+	defaultLogLevel         = "info"
+	defaultSigCacheMaxSize  = 100000
+	defaultUtxoCacheMaxSize = 150
+	minUtxoCacheMaxSize     = 25
+	maxUtxoCacheMaxSize     = 32768 // 32 GiB
+
+	// Defaults for RPC server options and policy.
+	defaultTLSCurve             = "P-256"
+	defaultMaxRPCClients        = 10
+	defaultMaxRPCWebsockets     = 25
+	defaultMaxRPCConcurrentReqs = 20
+
+	// Defaults for P2P network options.
+	defaultMaxSameIP       = 5
+	defaultMaxPeers        = 125
+	defaultDialTimeout     = time.Second * 30
+	defaultPeerIdleTimeout = time.Second * 120
+
+	// Defaults for banning options.
+	defaultBanDuration  = time.Hour * 24
+	defaultBanThreshold = 100
+
+	// Defaults for relay and mempool policy options.
+	defaultMaxOrphanTransactions = 100
 	defaultAllowOldVotes         = false
-	defaultMaxOrphanTransactions = 1000
-	defaultMaxOrphanTxSize       = 5000
-	defaultSigCacheMaxSize       = 100000
-	defaultTxIndex               = false
-	defaultNoExistsAddrIndex     = false
+
+	// Defaults for mining options and policy.
+	defaultGenerate            = false
+	defaultBlockMaxSize        = 375000
+	blockMaxSizeMin            = 1000
+	defaultNoMiningStateSync   = false
+	defaultAllowUnsyncedMining = false
+
+	// Defaults for indexing options.
+	defaultTxIndex           = false
+	defaultNoExistsAddrIndex = false
+
+	// Authorization types.
+	authTypeBasic      = "basic"
+	authTypeClientCert = "clientcert"
 )
 
 var (
-	defaultHomeDir     = dcrutil.AppDataDir("dcrd", false)
-	defaultConfigFile  = filepath.Join(defaultHomeDir, defaultConfigFilename)
-	defaultDataDir     = filepath.Join(defaultHomeDir, defaultDataDirname)
-	knownDbTypes       = database.SupportedDrivers()
-	defaultRPCKeyFile  = filepath.Join(defaultHomeDir, "rpc.key")
-	defaultRPCCertFile = filepath.Join(defaultHomeDir, "rpc.cert")
-	defaultLogDir      = filepath.Join(defaultHomeDir, defaultLogDirname)
+	// Constructed defaults for general application behavior options.
+	defaultHomeDir    = dcrutil.AppDataDir("dcrd", false)
+	defaultConfigFile = filepath.Join(defaultHomeDir, defaultConfigFilename)
+	defaultDataDir    = filepath.Join(defaultHomeDir, defaultDataDirname)
+	defaultLogDir     = filepath.Join(defaultHomeDir, defaultLogDirname)
+	knownDbTypes      = database.SupportedDrivers()
+
+	// Constructed defaults for RPC server options and policy.
+	defaultRPCKeyFile   = filepath.Join(defaultHomeDir, "rpc.key")
+	defaultRPCCertFile  = filepath.Join(defaultHomeDir, "rpc.cert")
+	defaultRPCAuthType  = authTypeBasic
+	defaultRPCClientCAs = filepath.Join(defaultHomeDir, "clients.pem")
 )
 
 // runServiceCommand is only set to a real function on Windows.  It is used
 // to parse and execute service commands specified via the -s flag.
 var runServiceCommand func(string) error
 
-// minUint32 is a helper function to return the minimum of two uint32s.
-// This avoids a math import and the need to cast to floats.
-func minUint32(a, b uint32) uint32 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // config defines the configuration options for dcrd.
 //
 // See loadConfig for details on the configuration load process.
 type config struct {
-	HomeDir              string        `short:"A" long:"appdata" description:"Path to application home directory"`
-	ShowVersion          bool          `short:"V" long:"version" description:"Display version information and exit"`
-	ConfigFile           string        `short:"C" long:"configfile" description:"Path to configuration file"`
-	DataDir              string        `short:"b" long:"datadir" description:"Directory to store data"`
-	LogDir               string        `long:"logdir" description:"Directory to log output."`
-	NoFileLogging        bool          `long:"nofilelogging" description:"Disable file logging."`
-	AddPeers             []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
-	ConnectPeers         []string      `long:"connect" description:"Connect only to the specified peers at startup"`
-	DisableListen        bool          `long:"nolisten" description:"Disable listening for incoming connections -- NOTE: Listening is automatically disabled if the --connect or --proxy options are used without also specifying listen interfaces via --listen"`
-	Listeners            []string      `long:"listen" description:"Add an interface/port to listen for connections (default all interfaces port: 9108, testnet: 19108)"`
-	MaxPeers             int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
-	DisableBanning       bool          `long:"nobanning" description:"Disable banning of misbehaving peers"`
-	BanDuration          time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
-	BanThreshold         uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers."`
-	Whitelists           []string      `long:"whitelist" description:"Add an IP network or IP that will not be banned. (eg. 192.168.1.0/24 or ::1)"`
-	RPCUser              string        `short:"u" long:"rpcuser" description:"Username for RPC connections"`
-	RPCPass              string        `short:"P" long:"rpcpass" default-mask:"-" description:"Password for RPC connections"`
-	RPCLimitUser         string        `long:"rpclimituser" description:"Username for limited RPC connections"`
-	RPCLimitPass         string        `long:"rpclimitpass" default-mask:"-" description:"Password for limited RPC connections"`
-	RPCListeners         []string      `long:"rpclisten" description:"Add an interface/port to listen for RPC connections (default port: 9109, testnet: 19109)"`
-	RPCCert              string        `long:"rpccert" description:"File containing the certificate file"`
-	RPCKey               string        `long:"rpckey" description:"File containing the certificate key"`
-	RPCMaxClients        int           `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
-	RPCMaxWebsockets     int           `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
-	RPCMaxConcurrentReqs int           `long:"rpcmaxconcurrentreqs" description:"Max number of concurrent RPC requests that may be processed concurrently"`
-	DisableRPC           bool          `long:"norpc" description:"Disable built-in RPC server -- NOTE: The RPC server is disabled by default if no rpcuser/rpcpass or rpclimituser/rpclimitpass is specified"`
-	DisableTLS           bool          `long:"notls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
-	DisableDNSSeed       bool          `long:"nodnsseed" description:"Disable DNS seeding for peers"`
-	ExternalIPs          []string      `long:"externalip" description:"Add an ip to the list of local addresses we claim to listen on to peers"`
-	Proxy                string        `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	ProxyUser            string        `long:"proxyuser" description:"Username for proxy server"`
-	ProxyPass            string        `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
-	OnionProxy           string        `long:"onion" description:"Connect to tor hidden services via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
-	OnionProxyUser       string        `long:"onionuser" description:"Username for onion proxy server"`
-	OnionProxyPass       string        `long:"onionpass" default-mask:"-" description:"Password for onion proxy server"`
-	NoOnion              bool          `long:"noonion" description:"Disable connecting to tor hidden services"`
-	TorIsolation         bool          `long:"torisolation" description:"Enable Tor stream isolation by randomizing user credentials for each connection."`
-	TestNet              bool          `long:"testnet" description:"Use the test network"`
-	SimNet               bool          `long:"simnet" description:"Use the simulation test network"`
-	DisableCheckpoints   bool          `long:"nocheckpoints" description:"Disable built-in checkpoints.  Don't do this unless you know what you're doing."`
-	DbType               string        `long:"dbtype" description:"Database backend to use for the Block Chain"`
-	Profile              string        `long:"profile" description:"Enable HTTP profiling on given [addr:]port -- NOTE port must be between 1024 and 65536"`
-	CPUProfile           string        `long:"cpuprofile" description:"Write CPU profile to the specified file"`
-	MemProfile           string        `long:"memprofile" description:"Write mem profile to the specified file"`
-	DumpBlockchain       string        `long:"dumpblockchain" description:"Write blockchain as a flat file of blocks for use with addblock, to the specified filename"`
-	MiningTimeOffset     int           `long:"miningtimeoffset" description:"Offset the mining timestamp of a block by this many seconds (positive values are in the past)"`
-	DebugLevel           string        `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
-	Upnp                 bool          `long:"upnp" description:"Use UPnP to map our listening port outside of NAT"`
-	MinRelayTxFee        float64       `long:"minrelaytxfee" description:"The minimum transaction fee in DCR/kB to be considered a non-zero fee."`
-	FreeTxRelayLimit     float64       `long:"limitfreerelay" description:"Limit relay of transactions with no transaction fee to the given amount in thousands of bytes per minute"`
-	NoRelayPriority      bool          `long:"norelaypriority" description:"Do not require free or low-fee transactions to have high priority for relaying"`
-	MaxOrphanTxs         int           `long:"maxorphantx" description:"Max number of orphan transactions to keep in memory"`
-	Generate             bool          `long:"generate" description:"Generate (mine) coins using the CPU"`
-	MiningAddrs          []string      `long:"miningaddr" description:"Add the specified payment address to the list of addresses to use for generated blocks -- At least one address is required if the generate option is set"`
-	BlockMinSize         uint32        `long:"blockminsize" description:"Mininum block size in bytes to be used when creating a block"`
-	BlockMaxSize         uint32        `long:"blockmaxsize" description:"Maximum block size in bytes to be used when creating a block"`
-	BlockPrioritySize    uint32        `long:"blockprioritysize" description:"Size in bytes for high-priority/low-fee transactions when creating a block"`
-	GetWorkKeys          []string      `long:"getworkkey" description:"DEPRECATED -- Use the --miningaddr option instead"`
-	NoPeerBloomFilters   bool          `long:"nopeerbloomfilters" description:"Disable bloom filtering support"`
-	SigCacheMaxSize      uint          `long:"sigcachemaxsize" description:"The maximum number of entries in the signature verification cache"`
-	NonAggressive        bool          `long:"nonaggressive" description:"Disable mining off of the parent block of the blockchain if there aren't enough voters"`
-	NoMiningStateSync    bool          `long:"nominingstatesync" description:"Disable synchronizing the mining state with other nodes"`
-	AllowOldVotes        bool          `long:"allowoldvotes" description:"Enable the addition of very old votes to the mempool"`
-	BlocksOnly           bool          `long:"blocksonly" description:"Do not accept transactions from remote peers."`
-	RelayNonStd          bool          `long:"relaynonstd" description:"Relay non-standard transactions regardless of the default settings for the active network."`
-	RejectNonStd         bool          `long:"rejectnonstd" description:"Reject non-standard transactions regardless of the default settings for the active network."`
-	TxIndex              bool          `long:"txindex" description:"Maintain a full hash-based transaction index which makes all transactions available via the getrawtransaction RPC"`
-	DropTxIndex          bool          `long:"droptxindex" description:"Deletes the hash-based transaction index from the database on start up and then exits."`
-	AddrIndex            bool          `long:"addrindex" description:"Maintain a full address-based transaction index which makes the searchrawtransactions RPC available"`
-	DropAddrIndex        bool          `long:"dropaddrindex" description:"Deletes the address-based transaction index from the database on start up and then exits."`
-	NoExistsAddrIndex    bool          `long:"noexistsaddrindex" description:"Disable the exists address index, which tracks whether or not an address has even been used."`
-	DropExistsAddrIndex  bool          `long:"dropexistsaddrindex" description:"Deletes the exists address index from the database on start up and then exits."`
-	PipeRx               uint          `long:"piperx" description:"File descriptor of read end pipe to enable parent -> child process communication"`
-	PipeTx               uint          `long:"pipetx" description:"File descriptor of write end pipe to enable parent <- child process communication"`
-	LifetimeEvents       bool          `long:"lifetimeevents" description:"Send lifetime notifications over the TX pipe"`
-	onionlookup          func(string) ([]net.IP, error)
-	lookup               func(string) ([]net.IP, error)
-	oniondial            func(string, string) (net.Conn, error)
-	dial                 func(string, string) (net.Conn, error)
-	miningAddrs          []dcrutil.Address
-	minRelayTxFee        dcrutil.Amount
-	whitelists           []*net.IPNet
+	// General application behavior.
+	ShowVersion      bool   `short:"V" long:"version" description:"Display version information and exit"`
+	HomeDir          string `short:"A" long:"appdata" description:"Path to application home directory" env:"DCRD_APPDATA"`
+	ConfigFile       string `short:"C" long:"configfile" description:"Path to configuration file"`
+	DataDir          string `short:"b" long:"datadir" description:"Directory to store data"`
+	LogDir           string `long:"logdir" description:"Directory to log output"`
+	LogSize          string `long:"logsize" description:"Maximum size of log file before it is rotated"`
+	NoFileLogging    bool   `long:"nofilelogging" description:"Disable file logging"`
+	DbType           string `long:"dbtype" description:"Database backend to use for the block chain"`
+	Profile          string `long:"profile" description:"Enable HTTP profiling on given [addr:]port -- NOTE port must be between 1024 and 65535"`
+	CPUProfile       string `long:"cpuprofile" description:"Write CPU profile to the specified file"`
+	MemProfile       string `long:"memprofile" description:"Write mem profile to the specified file"`
+	TestNet          bool   `long:"testnet" description:"Use the test network"`
+	SimNet           bool   `long:"simnet" description:"Use the simulation test network"`
+	RegNet           bool   `long:"regnet" description:"Use the regression test network"`
+	DebugLevel       string `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
+	SigCacheMaxSize  uint   `long:"sigcachemaxsize" description:"The maximum number of entries in the signature verification cache"`
+	UtxoCacheMaxSize uint   `long:"utxocachemaxsize" description:"The maximum size in MiB of the utxo cache; (min: 25, max: 32768)"`
+
+	// RPC server options and policy.
+	DisableRPC           bool     `long:"norpc" description:"Disable built-in RPC server -- NOTE: The RPC server is disabled by default if no rpcuser/rpcpass or rpclimituser/rpclimitpass is specified"`
+	RPCListeners         []string `long:"rpclisten" description:"Add an interface/port to listen for RPC connections (default port: 9109, testnet: 19109)"`
+	RPCUser              string   `short:"u" long:"rpcuser" description:"Username for RPC connections"`
+	RPCPass              string   `short:"P" long:"rpcpass" default-mask:"-" description:"Password for RPC connections"`
+	RPCAuthType          string   `long:"authtype" description:"Method for RPC client authentication (basic or clientcert)"`
+	RPCClientCAs         string   `long:"clientcafile" description:"File containing Certificate Authorities to verify TLS client certificates; requires authtype=clientcert"`
+	RPCLimitUser         string   `long:"rpclimituser" description:"Username for limited RPC connections"`
+	RPCLimitPass         string   `long:"rpclimitpass" default-mask:"-" description:"Password for limited RPC connections"`
+	RPCCert              string   `long:"rpccert" description:"File containing the certificate file"`
+	RPCKey               string   `long:"rpckey" description:"File containing the certificate key"`
+	TLSCurve             string   `long:"tlscurve" description:"Curve to use when generating TLS keypairs"`
+	AltDNSNames          []string `long:"altdnsnames" description:"Specify additional DNS names to use when generating the RPC server certificate" env:"DCRD_ALT_DNSNAMES" env-delim:","`
+	DisableTLS           bool     `long:"notls" description:"Disable TLS for the RPC server -- NOTE: This is only allowed if the RPC server is bound to localhost"`
+	RPCMaxClients        int      `long:"rpcmaxclients" description:"Max number of RPC clients for standard connections"`
+	RPCMaxWebsockets     int      `long:"rpcmaxwebsockets" description:"Max number of RPC websocket connections"`
+	RPCMaxConcurrentReqs int      `long:"rpcmaxconcurrentreqs" description:"Max number of concurrent RPC requests that may be processed concurrently"`
+
+	// P2P proxy and Tor settings.
+	Proxy          string `long:"proxy" description:"Connect via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	ProxyUser      string `long:"proxyuser" description:"Username for proxy server"`
+	ProxyPass      string `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
+	OnionProxy     string `long:"onion" description:"Connect to tor hidden services via SOCKS5 proxy (eg. 127.0.0.1:9050)"`
+	OnionProxyUser string `long:"onionuser" description:"Username for onion proxy server"`
+	OnionProxyPass string `long:"onionpass" default-mask:"-" description:"Password for onion proxy server"`
+	NoOnion        bool   `long:"noonion" description:"Disable connecting to tor hidden services"`
+	TorIsolation   bool   `long:"torisolation" description:"Enable Tor stream isolation by randomizing user credentials for each connection"`
+
+	// P2P network options.
+	AddPeers        []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
+	ConnectPeers    []string      `long:"connect" description:"Connect only to the specified peers at startup"`
+	DisableListen   bool          `long:"nolisten" description:"Disable listening for incoming connections -- NOTE: Listening is automatically disabled if the --connect or --proxy options are used without also specifying listen interfaces via --listen"`
+	Listeners       []string      `long:"listen" description:"Add an interface/port to listen for connections (default all interfaces port: 9108, testnet: 19108)"`
+	MaxSameIP       int           `long:"maxsameip" description:"Max number of connections with the same IP -- 0 to disable"`
+	MaxPeers        int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
+	DialTimeout     time.Duration `long:"dialtimeout" description:"How long to wait for TCP connection completion.  Valid time units are {s, m, h}.  Minimum 1 second"`
+	PeerIdleTimeout time.Duration `long:"peeridletimeout" description:"The duration of inactivity before a peer is timed out.  Valid time units are {s,m,h}.  Minimum 15 seconds"`
+
+	// P2P network discovery options.
+	DisableSeeders bool     `long:"noseeders" description:"Disable seeding for peer discovery"`
+	DisableDNSSeed bool     `long:"nodnsseed" description:"DEPRECATED: use --noseeders"`
+	ExternalIPs    []string `long:"externalip" description:"Add a public-facing IP to the list of local external IPs that dcrd will advertise to other peers"`
+	NoDiscoverIP   bool     `long:"nodiscoverip" description:"Disable automatic network address discovery of local external IPs"`
+	Upnp           bool     `long:"upnp" description:"REMOVED: This feature is no longer available and this flag will be removed in a future version"`
+
+	// Banning options.
+	DisableBanning bool          `long:"nobanning" description:"Disable banning of misbehaving peers"`
+	BanDuration    time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
+	BanThreshold   uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers"`
+	Whitelists     []string      `long:"whitelist" description:"Add an IP network or IP that will not be banned (eg. 192.168.1.0/24 or ::1)"`
+
+	// Chain related options.
+	AllowOldForks  bool   `long:"allowoldforks" description:"Process forks deep in history.  Don't do this unless you know what you're doing"`
+	DumpBlockchain string `long:"dumpblockchain" description:"Write blockchain as a flat file of blocks for use with addblock, to the specified filename"`
+	AssumeValid    string `long:"assumevalid" description:"Hash of an assumed valid block.  Defaults to the hard-coded assumed valid block that is updated periodically with new releases.  Don't use a different hash unless you understand the implications.  Set to 0 to disable"`
+
+	// Relay and mempool policy.
+	MinRelayTxFee    float64 `long:"minrelaytxfee" description:"The minimum transaction fee in DCR/kB to be considered a non-zero fee"`
+	FreeTxRelayLimit float64 `long:"limitfreerelay" description:"DEPRECATED: This behavior is no longer available and this option will be removed in a future version of the software"`
+	NoRelayPriority  bool    `long:"norelaypriority" description:"DEPRECATED: This behavior is no longer available and this option will be removed in a future version of the software"`
+	MaxOrphanTxs     int     `long:"maxorphantx" description:"Max number of orphan transactions to keep in memory"`
+	BlocksOnly       bool    `long:"blocksonly" description:"Do not accept transactions from remote peers"`
+	AcceptNonStd     bool    `long:"acceptnonstd" description:"Accept and relay non-standard transactions to the network regardless of the default settings for the active network"`
+	RejectNonStd     bool    `long:"rejectnonstd" description:"Reject non-standard transactions regardless of the default settings for the active network"`
+	AllowOldVotes    bool    `long:"allowoldvotes" description:"Enable the addition of very old votes to the mempool"`
+
+	// Mining options and policy.
+	Generate            bool     `long:"generate" description:"Generate (mine) coins using the CPU"`
+	MiningAddrs         []string `long:"miningaddr" description:"Add the specified payment address to the list of addresses to use for generated blocks.  At least one address is required if the generate option is set"`
+	BlockMinSize        uint32   `long:"blockminsize" description:"DEPRECATED: This behavior is no longer available and this option will be removed in a future version of the software"`
+	BlockMaxSize        uint32   `long:"blockmaxsize" description:"Maximum block size in bytes to be used when creating a block"`
+	BlockPrioritySize   uint32   `long:"blockprioritysize" description:"DEPRECATED: This behavior is no longer available and this option will be removed in a future version of the software"`
+	MiningTimeOffset    int      `long:"miningtimeoffset" description:"Offset the mining timestamp of a block by this many seconds (positive values are in the past)"`
+	NonAggressive       bool     `long:"nonaggressive" description:"Disable mining off of the parent block of the blockchain if there aren't enough voters"`
+	NoMiningStateSync   bool     `long:"nominingstatesync" description:"Disable synchronizing the mining state with other nodes"`
+	AllowUnsyncedMining bool     `long:"allowunsyncedmining" description:"Allow block templates to be generated even when the chain is not considered synced on networks other than the main network.  This is automatically enabled when the simnet option is set.  Don't do this unless you know what you're doing"`
+
+	// Indexing options.
+	TxIndex             bool `long:"txindex" description:"Maintain a full hash-based transaction index which makes all transactions available via the getrawtransaction RPC"`
+	DropTxIndex         bool `long:"droptxindex" description:"Deletes the hash-based transaction index from the database on start up and then exits"`
+	NoExistsAddrIndex   bool `long:"noexistsaddrindex" description:"Disable the exists address index, which tracks whether or not an address has even been used"`
+	DropExistsAddrIndex bool `long:"dropexistsaddrindex" description:"Deletes the exists address index from the database on start up and then exits"`
+
+	// IPC options.
+	PipeRx          uint `long:"piperx" description:"File descriptor of read end pipe to enable parent -> child process communication"`
+	PipeTx          uint `long:"pipetx" description:"File descriptor of write end pipe to enable parent <- child process communication"`
+	LifetimeEvents  bool `long:"lifetimeevents" description:"Send lifetime notifications over the TX pipe"`
+	BoundAddrEvents bool `long:"boundaddrevents" description:"Send notifications with the locally bound addresses of the P2P and RPC subsystems over the TX pipe"`
+
+	// Cooked options ready for use.
+	onionlookup   func(string) ([]net.IP, error)
+	lookup        func(string) ([]net.IP, error)
+	oniondial     func(context.Context, string, string) (net.Conn, error)
+	dial          func(context.Context, string, string) (net.Conn, error)
+	miningAddrs   []stdaddr.Address
+	minRelayTxFee dcrutil.Amount
+	whitelists    []netip.Prefix
+	ipv4NetInfo   types.NetworksResult
+	ipv6NetInfo   types.NetworksResult
+	onionNetInfo  types.NetworksResult
+	params        *params
 }
 
 // serviceOptions defines the configuration options for the daemon as a service on
@@ -179,20 +242,60 @@ type serviceOptions struct {
 // cleanAndExpandPath expands environment variables and leading ~ in the
 // passed path, cleans the result, and returns it.
 func cleanAndExpandPath(path string) string {
-	// Expand initial ~ to OS specific home directory.
-	if strings.HasPrefix(path, "~") {
-		homeDir := filepath.Dir(defaultHomeDir)
-		path = strings.Replace(path, "~", homeDir, 1)
+	// Nothing to do when no path is given.
+	if path == "" {
+		return path
 	}
 
-	// NOTE: The os.ExpandEnv doesn't work with Windows-style %VARIABLE%,
-	// but they variables can still be expanded via POSIX-style $VARIABLE.
-	return filepath.Clean(os.ExpandEnv(path))
+	// NOTE: The os.ExpandEnv doesn't work with Windows cmd.exe-style
+	// %VARIABLE%, but the variables can still be expanded via POSIX-style
+	// $VARIABLE.
+	path = os.ExpandEnv(path)
+
+	if !strings.HasPrefix(path, "~") {
+		return filepath.Clean(path)
+	}
+
+	// Expand initial ~ to the current user's home directory, or ~otheruser
+	// to otheruser's home directory.  On Windows, both forward and backward
+	// slashes can be used.
+	path = path[1:]
+
+	var pathSeparators string
+	if runtime.GOOS == "windows" {
+		pathSeparators = string(os.PathSeparator) + "/"
+	} else {
+		pathSeparators = string(os.PathSeparator)
+	}
+
+	userName := ""
+	if i := strings.IndexAny(path, pathSeparators); i != -1 {
+		userName = path[:i]
+		path = path[i:]
+	}
+
+	homeDir := ""
+	var u *user.User
+	var err error
+	if userName == "" {
+		u, err = user.Current()
+	} else {
+		u, err = user.Lookup(userName)
+	}
+	if err == nil {
+		homeDir = u.HomeDir
+	}
+	// Fallback to CWD if user lookup fails or user has no home directory.
+	if homeDir == "" {
+		homeDir = "."
+	}
+
+	return filepath.Join(homeDir, path)
 }
 
 // validLogLevel returns whether or not logLevel is a valid debug log level.
 func validLogLevel(logLevel string) bool {
-	_, ok := btclog.LevelFromString(logLevel)
+	_, ok := slog.LevelFromString(logLevel)
 	return ok
 }
 
@@ -214,7 +317,7 @@ func supportedSubsystems() []string {
 // the levels accordingly.  An appropriate error is returned if anything is
 // invalid.
 func parseAndSetDebugLevels(debugLevel string) error {
-	// When the specified string doesn't have any delimters, treat it as
+	// When the specified string doesn't have any delimiters, treat it as
 	// the log level for all subsystems.
 	if !strings.Contains(debugLevel, ",") && !strings.Contains(debugLevel, "=") {
 		// Validate debug log level.
@@ -245,7 +348,7 @@ func parseAndSetDebugLevels(debugLevel string) error {
 		// Validate subsystem.
 		if _, exists := subsystemLoggers[subsysID]; !exists {
 			str := "the specified subsystem [%v] is invalid -- " +
-				"supported subsytems %v"
+				"supported subsystems %v"
 			return fmt.Errorf(str, subsysID, supportedSubsystems())
 		}
 
@@ -286,27 +389,62 @@ func removeDuplicateAddresses(addrs []string) []string {
 	return result
 }
 
-// normalizeAddress returns addr with the passed default port appended if
-// there is not already a port specified.
-func normalizeAddress(addr, defaultPort string) string {
-	_, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return net.JoinHostPort(addr, defaultPort)
-	}
-	return addr
-}
+const (
+	normalizeInterfaceAddrs = 1 << iota
+	normalizeInterfaceFirstAddr
+)
 
 // normalizeAddresses returns a new slice with all the passed peer addresses
 // normalized with the given default port, and all duplicates removed.
-func normalizeAddresses(addrs []string, defaultPort string) []string {
-	for i, addr := range addrs {
-		addrs[i] = normalizeAddress(addr, defaultPort)
+//
+// If an address is an interface name, and the flags has the
+// normalizeInterfaceAddrs bit set, all IP addresses associated with the
+// interface will appear in the result.  If the normalizeInterfaceFirstAddr
+// bit is set, only the first address of the interface is included.
+func normalizeAddresses(addrs []string, defaultPort string, flags int) []string {
+	norm := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		port := defaultPort
+		if a, p, err := net.SplitHostPort(addr); err == nil {
+			addr = a
+			port = p
+		}
+		var iface *net.Interface
+		if flags != 0 {
+			iface, _ = net.InterfaceByName(addr)
+		}
+		if iface == nil {
+			norm = append(norm, net.JoinHostPort(addr, port))
+			continue
+		}
+		ifaceAddrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+	IfaceAddrs:
+		for _, a := range ifaceAddrs {
+			if a, ok := a.(*net.IPNet); ok {
+				lis := a.IP.String()
+				if a.IP.To4() == nil { // IPv6
+					zoned := a.IP.IsLinkLocalUnicast() ||
+						a.IP.IsLinkLocalMulticast()
+					if zoned {
+						lis += "%" + strconv.Itoa(iface.Index)
+					}
+				}
+				norm = append(norm, net.JoinHostPort(
+					lis, port))
+				if flags&normalizeInterfaceFirstAddr != 0 {
+					break IfaceAddrs
+				}
+			}
+		}
 	}
 
-	return removeDuplicateAddresses(addrs)
+	return removeDuplicateAddresses(norm)
 }
 
-// filesExists reports whether the named file or directory exists.
+// fileExists reports whether the named file or directory exists.
 func fileExists(name string) bool {
 	if _, err := os.Stat(name); err != nil {
 		if os.IsNotExist(err) {
@@ -325,120 +463,215 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 	return parser
 }
 
-// createDefaultConfig copies the file sample-dcrd.conf to the given destination path,
-// and populates it with some randomly generated RPC username and password.
-func createDefaultConfigFile(destPath string) error {
+// createDefaultConfigFile copies the file sample-dcrd.conf to the given
+// destination path, and populates it with some randomly generated RPC username
+// and password.
+func createDefaultConfigFile(destPath string, authType string) error {
 	// Create the destination directory if it does not exist.
 	err := os.MkdirAll(filepath.Dir(destPath), 0700)
 	if err != nil {
 		return err
 	}
 
-	// Generate a random user and password for the RPC server credentials.
-	randomBytes := make([]byte, 20)
-	_, err = rand.Read(randomBytes)
-	if err != nil {
-		return err
-	}
-	generatedRPCUser := base64.StdEncoding.EncodeToString(randomBytes)
-	rpcUserLine := fmt.Sprintf("rpcuser=%v", generatedRPCUser)
+	cfg := sampleconfig.Dcrd()
 
-	_, err = rand.Read(randomBytes)
-	if err != nil {
-		return err
-	}
-	generatedRPCPass := base64.StdEncoding.EncodeToString(randomBytes)
-	rpcPassLine := fmt.Sprintf("rpcpass=%v", generatedRPCPass)
+	// Set a randomized rpcuser and rpcpass if the authorization type is basic.
+	if authType == authTypeBasic {
+		// Generate a random user and password for the RPC server credentials.
+		randomBytes := make([]byte, 20)
+		_, err = rand.Read(randomBytes)
+		if err != nil {
+			return err
+		}
+		generatedRPCUser := base64.StdEncoding.EncodeToString(randomBytes)
+		rpcUserLine := fmt.Sprintf("rpcuser=%v", generatedRPCUser)
 
-	// Replace the rpcuser and rpcpass lines in the sample configuration
-	// file contents with their generated values.
-	rpcUserRE := regexp.MustCompile(`(?m)^;\s*rpcuser=[^\s]*$`)
-	rpcPassRE := regexp.MustCompile(`(?m)^;\s*rpcpass=[^\s]*$`)
-	s := rpcUserRE.ReplaceAllString(sampleconfig.FileContents, rpcUserLine)
-	s = rpcPassRE.ReplaceAllString(s, rpcPassLine)
+		_, err = rand.Read(randomBytes)
+		if err != nil {
+			return err
+		}
+		generatedRPCPass := base64.StdEncoding.EncodeToString(randomBytes)
+		rpcPassLine := fmt.Sprintf("rpcpass=%v", generatedRPCPass)
+
+		// Replace the rpcuser and rpcpass lines in the sample configuration
+		// file contents with their generated values.
+		rpcUserRE := regexp.MustCompile(`(?m)^;\s*rpcuser=[^\s]*$`)
+		rpcPassRE := regexp.MustCompile(`(?m)^;\s*rpcpass=[^\s]*$`)
+		updatedCfg := rpcUserRE.ReplaceAllString(cfg, rpcUserLine)
+		updatedCfg = rpcPassRE.ReplaceAllString(updatedCfg, rpcPassLine)
+		cfg = updatedCfg
+	}
 
 	// Create config file at the provided path.
-	dest, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC,
-		0600)
+	dest, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return err
 	}
 	defer dest.Close()
 
-	_, err = dest.WriteString(s)
+	_, err = dest.WriteString(cfg)
 	return err
+}
+
+// generateNetworkInfo is a convenience function that creates a slice from the
+// available networks.
+func (cfg *config) generateNetworkInfo() []types.NetworksResult {
+	return []types.NetworksResult{cfg.ipv4NetInfo, cfg.ipv6NetInfo,
+		cfg.onionNetInfo}
+}
+
+// parseNetworkInterfaces updates all network interface states based on the
+// provided configuration.
+func parseNetworkInterfaces(cfg *config) error {
+	var v4Addrs, v6Addrs uint32
+	listeners, err := parseListeners(cfg.Listeners)
+	if err != nil {
+		return err
+	}
+
+	for _, addr := range listeners {
+		if addr.Network() == "tcp4" {
+			v4Addrs++
+			continue
+		}
+
+		if addr.Network() == "tcp6" {
+			v6Addrs++
+		}
+	}
+
+	// Set IPV4 interface state.
+	if v4Addrs > 0 {
+		ipv4 := &cfg.ipv4NetInfo
+		ipv4.Reachable = !cfg.DisableListen
+		ipv4.Limited = v6Addrs == 0
+		ipv4.Proxy = cfg.Proxy
+	}
+
+	// Set IPV6 interface state.
+	if v6Addrs > 0 {
+		ipv6 := &cfg.ipv6NetInfo
+		ipv6.Reachable = !cfg.DisableListen
+		ipv6.Limited = v4Addrs == 0
+		ipv6.Proxy = cfg.Proxy
+	}
+
+	// Set Onion interface state.
+	if v6Addrs > 0 && (cfg.Proxy != "" || cfg.OnionProxy != "") {
+		onion := &cfg.onionNetInfo
+		onion.Reachable = !cfg.DisableListen && !cfg.NoOnion
+		onion.Limited = v4Addrs == 0
+		onion.Proxy = cfg.Proxy
+		if cfg.OnionProxy != "" {
+			onion.Proxy = cfg.OnionProxy
+		}
+		onion.ProxyRandomizeCredentials = cfg.TorIsolation
+	}
+
+	return nil
+}
+
+// errSuppressUsage signifies that an error that happened during the initial
+// configuration phase should suppress the usage output since it was not caused
+// by the user.
+type errSuppressUsage string
+
+// Error implements the error interface.
+func (e errSuppressUsage) Error() string {
+	return string(e)
 }
 
 // loadConfig initializes and parses the config using a config file and command
 // line options.
 //
 // The configuration proceeds as follows:
-// 	1) Start with a default config with sane settings
-// 	2) Pre-parse the command line to check for an alternative config file
-// 	3) Load configuration file overwriting defaults with any specified options
-// 	4) Parse CLI options and overwrite/add any specified options
+//  1. Start with a default config with sane settings
+//  2. Check if help has been requested, print it and exit if so
+//  3. Pre-parse the command line to check for an alternative config file
+//  4. Load configuration file overwriting defaults with any specified options
+//  5. Parse CLI options and overwrite/add any specified options
 //
 // The above results in dcrd functioning properly without any config settings
 // while still allowing the user to override settings with config files and
 // command line options.  Command line options always take precedence.
-func loadConfig() (*config, []string, error) {
+func loadConfig(appName string) (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		HomeDir:              defaultHomeDir,
-		ConfigFile:           defaultConfigFile,
-		DebugLevel:           defaultLogLevel,
-		MaxPeers:             defaultMaxPeers,
-		BanDuration:          defaultBanDuration,
-		BanThreshold:         defaultBanThreshold,
+		// General application behavior.
+		HomeDir:          defaultHomeDir,
+		ConfigFile:       defaultConfigFile,
+		DataDir:          defaultDataDir,
+		LogDir:           defaultLogDir,
+		LogSize:          defaultLogSize,
+		DbType:           defaultDbType,
+		DebugLevel:       defaultLogLevel,
+		SigCacheMaxSize:  defaultSigCacheMaxSize,
+		UtxoCacheMaxSize: defaultUtxoCacheMaxSize,
+
+		// RPC server options and policy.
+		RPCCert:              defaultRPCCertFile,
+		RPCKey:               defaultRPCKeyFile,
+		RPCAuthType:          defaultRPCAuthType,
+		RPCClientCAs:         defaultRPCClientCAs,
+		TLSCurve:             defaultTLSCurve,
 		RPCMaxClients:        defaultMaxRPCClients,
 		RPCMaxWebsockets:     defaultMaxRPCWebsockets,
 		RPCMaxConcurrentReqs: defaultMaxRPCConcurrentReqs,
-		DataDir:              defaultDataDir,
-		LogDir:               defaultLogDir,
-		DbType:               defaultDbType,
-		RPCKey:               defaultRPCKeyFile,
-		RPCCert:              defaultRPCCertFile,
-		MinRelayTxFee:        mempool.DefaultMinRelayTxFee.ToCoin(),
-		FreeTxRelayLimit:     defaultFreeTxRelayLimit,
-		BlockMinSize:         defaultBlockMinSize,
-		BlockMaxSize:         defaultBlockMaxSize,
-		BlockPrioritySize:    mempool.DefaultBlockPrioritySize,
-		MaxOrphanTxs:         defaultMaxOrphanTransactions,
-		SigCacheMaxSize:      defaultSigCacheMaxSize,
-		Generate:             defaultGenerate,
-		NoMiningStateSync:    defaultNoMiningStateSync,
-		TxIndex:              defaultTxIndex,
-		AddrIndex:            defaultAddrIndex,
-		AllowOldVotes:        defaultAllowOldVotes,
-		NoExistsAddrIndex:    defaultNoExistsAddrIndex,
+
+		// P2P network options.
+		MaxSameIP:       defaultMaxSameIP,
+		MaxPeers:        defaultMaxPeers,
+		DialTimeout:     defaultDialTimeout,
+		PeerIdleTimeout: defaultPeerIdleTimeout,
+
+		// Banning options.
+		BanDuration:  defaultBanDuration,
+		BanThreshold: defaultBanThreshold,
+
+		// Relay and mempool policy.
+		MinRelayTxFee: mempool.DefaultMinRelayTxFee.ToCoin(),
+		MaxOrphanTxs:  defaultMaxOrphanTransactions,
+		AllowOldVotes: defaultAllowOldVotes,
+
+		// Mining options and policy.
+		Generate:            defaultGenerate,
+		BlockMaxSize:        defaultBlockMaxSize,
+		NoMiningStateSync:   defaultNoMiningStateSync,
+		AllowUnsyncedMining: defaultAllowUnsyncedMining,
+
+		// Indexing options.
+		TxIndex:           defaultTxIndex,
+		NoExistsAddrIndex: defaultNoExistsAddrIndex,
+
+		// Cooked options ready for use.
+		ipv4NetInfo:  types.NetworksResult{Name: "IPV4"},
+		ipv6NetInfo:  types.NetworksResult{Name: "IPV6"},
+		onionNetInfo: types.NetworksResult{Name: "Onion"},
+		params:       &mainNetParams,
+	}
+
+	// Pre-parse the command line options looking only for the help option. If
+	// found, print the help message to stdout and exit.
+	helpOpts := flags.Options(flags.HelpFlag | flags.PrintErrors | flags.IgnoreUnknown)
+	_, err := flags.NewParser(&cfg, helpOpts).Parse()
+	if flags.WroteHelp(err) {
+		os.Exit(0)
 	}
 
 	// Service options which are only added on Windows.
 	serviceOpts := serviceOptions{}
 
-	// Pre-parse the command line options to see if an alternative config
-	// file or the version flag was specified.  Any errors aside from the
-	// help message error can be ignored here since they will be caught by
-	// the final parse below.
+	// Pre-parse the command line options to see if an alternative config file
+	// or the version flag was specified.  Any errors can be ignored here since
+	// they will be caught by the final parse below.
 	preCfg := cfg
-	preParser := newConfigParser(&preCfg, &serviceOpts, flags.HelpFlag)
-	_, err := preParser.Parse()
-	if err != nil {
-		if e, ok := err.(*flags.Error); ok && e.Type != flags.ErrHelp {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		} else if ok && e.Type == flags.ErrHelp {
-			fmt.Fprintln(os.Stdout, err)
-			os.Exit(0)
-		}
-	}
+	preParser := newConfigParser(&preCfg, &serviceOpts, flags.None)
+	_, _ = preParser.Parse()
 
 	// Show the version and exit if the version flag was specified.
-	appName := filepath.Base(os.Args[0])
-	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
-	usageMessage := fmt.Sprintf("Use %s -h to show usage", appName)
 	if preCfg.ShowVersion {
-		fmt.Printf("%s version %s (Go version %s)\n", appName, version(), runtime.Version())
+		fmt.Printf("%s version %s (Go version %s %s/%s)\n", appName,
+			version.String(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 
@@ -482,6 +715,11 @@ func loadConfig() (*config, []string, error) {
 		} else {
 			cfg.RPCCert = preCfg.RPCCert
 		}
+		if preCfg.RPCClientCAs == defaultRPCClientCAs {
+			cfg.RPCClientCAs = filepath.Join(cfg.HomeDir, "clients.pem")
+		} else {
+			cfg.RPCClientCAs = preCfg.RPCClientCAs
+		}
 		if preCfg.LogDir == defaultLogDir {
 			cfg.LogDir = filepath.Join(cfg.HomeDir, defaultLogDirname)
 		} else {
@@ -491,10 +729,10 @@ func loadConfig() (*config, []string, error) {
 
 	// Create a default config file when one does not exist and the user did
 	// not specify an override.
-	if !preCfg.SimNet && preCfg.ConfigFile == defaultConfigFile &&
-		!fileExists(preCfg.ConfigFile) {
+	if !(preCfg.SimNet || preCfg.RegNet) && preCfg.ConfigFile ==
+		defaultConfigFile && !fileExists(preCfg.ConfigFile) {
 
-		err := createDefaultConfigFile(preCfg.ConfigFile)
+		err := createDefaultConfigFile(preCfg.ConfigFile, preCfg.RPCAuthType)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating a default "+
 				"config file: %v\n", err)
@@ -503,26 +741,27 @@ func loadConfig() (*config, []string, error) {
 
 	// Load additional config from file.
 	var configFileError error
-	parser := newConfigParser(&cfg, &serviceOpts, flags.Default)
-	if !cfg.SimNet || preCfg.ConfigFile != defaultConfigFile {
+	parser := newConfigParser(&cfg, &serviceOpts, flags.PassDoubleDash)
+	if !(cfg.SimNet || cfg.RegNet) || preCfg.ConfigFile != defaultConfigFile {
 		err := flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
 		if err != nil {
-			if _, ok := err.(*os.PathError); !ok {
-				fmt.Fprintf(os.Stderr, "Error parsing config "+
-					"file: %v\n", err)
-				fmt.Fprintln(os.Stderr, usageMessage)
+			var e *os.PathError
+			if !errors.As(err, &e) {
+				err = fmt.Errorf("Error parsing config file: %w", err)
 				return nil, nil, err
 			}
 			configFileError = err
 		}
 	}
 
+	// Don't add peers from the config file when in regression test mode.
+	if preCfg.RegNet && len(cfg.AddPeers) > 0 {
+		cfg.AddPeers = nil
+	}
+
 	// Parse command line options again to ensure they take precedence.
 	remainingArgs, err := parser.Parse()
 	if err != nil {
-		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
-			fmt.Fprintln(os.Stderr, usageMessage)
-		}
 		return nil, nil, err
 	}
 
@@ -533,62 +772,82 @@ func loadConfig() (*config, []string, error) {
 		// Show a nicer error message if it's because a symlink is
 		// linked to a directory that does not exist (probably because
 		// it's not mounted).
-		if e, ok := err.(*os.PathError); ok && os.IsExist(err) {
+		var e *os.PathError
+		if errors.As(err, &e) && os.IsExist(err) {
 			if link, lerr := os.Readlink(e.Path); lerr == nil {
 				str := "is symlink %s -> %s mounted?"
 				err = fmt.Errorf(str, e.Path, link)
 			}
 		}
 
-		str := "%s: failed to create home directory: %v"
-		err := fmt.Errorf(str, funcName, err)
-		fmt.Fprintln(os.Stderr, err)
+		str := "%s: failed to create home directory: %s"
+		err := errSuppressUsage(fmt.Sprintf(str, funcName, err))
 		return nil, nil, err
 	}
 
-	// Multiple networks can't be selected simultaneously.
-	numNets := 0
+	if cfg.DisableDNSSeed {
+		cfg.DisableSeeders = true
+		fmt.Fprintln(os.Stderr, "The --nodnsseed option is deprecated: use "+
+			"--noseeders")
+	}
 
-	// Count number of network flags passed; assign active network params
-	// while we're at it
+	// Multiple networks can't be selected simultaneously.  Count number of
+	// network flags passed and assign active network params.
+	numNets := 0
 	if cfg.TestNet {
 		numNets++
-		activeNetParams = &testNet2Params
+		cfg.params = &testNet3Params
 	}
 	if cfg.SimNet {
 		numNets++
 		// Also disable dns seeding on the simulation test network.
-		activeNetParams = &simNetParams
-		cfg.DisableDNSSeed = true
+		cfg.params = &simNetParams
+		cfg.DisableSeeders = true
+	}
+	if cfg.RegNet {
+		numNets++
+		cfg.params = &regNetParams
 	}
 	if numNets > 1 {
-		str := "%s: the testnet and simnet params can't be " +
+		str := "%s: the testnet, regnet, and simnet params can't be " +
 			"used together -- choose one of the three"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
+	}
+
+	// Warn on use of deprecated option to modify the rate limit of low-fee/free
+	// transaction rate limiting.
+	if cfg.FreeTxRelayLimit != 0 {
+		fmt.Fprintln(os.Stderr, "The --limitfreerelay option is deprecated "+
+			"and will be removed in a future version of the software: please "+
+			"remove it from your config")
+	}
+
+	// Warn on use of deprecated option to disable relaying of low-fee/free
+	// transactions.
+	if cfg.NoRelayPriority {
+		fmt.Fprintln(os.Stderr, "The --norelaypriority option is deprecated "+
+			"and will be removed in a future version of the software: please "+
+			"remove it from your config")
 	}
 
 	// Set the default policy for relaying non-standard transactions
 	// according to the default of the active network. The set
 	// configuration value takes precedence over the default value for the
 	// selected network.
-	relayNonStd := activeNetParams.RelayNonStdTxs
+	acceptNonStd := cfg.params.AcceptNonStdTxs
 	switch {
-	case cfg.RelayNonStd && cfg.RejectNonStd:
-		str := "%s: rejectnonstd and relaynonstd cannot be used " +
+	case cfg.AcceptNonStd && cfg.RejectNonStd:
+		str := "%s: rejectnonstd and acceptnonstd cannot be used " +
 			"together -- choose only one"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	case cfg.RejectNonStd:
-		relayNonStd = false
-	case cfg.RelayNonStd:
-		relayNonStd = true
+		acceptNonStd = false
+	case cfg.AcceptNonStd:
+		acceptNonStd = true
 	}
-	cfg.RelayNonStd = relayNonStd
+	cfg.AcceptNonStd = acceptNonStd
 
 	// Append the network type to the data directory so it is "namespaced"
 	// per network.  In addition to the block database, there are other
@@ -602,17 +861,49 @@ func loadConfig() (*config, []string, error) {
 	cfg.DataDir = cleanAndExpandPath(cfg.DataDir)
 	var oldTestNets []string
 	oldTestNets = append(oldTestNets, filepath.Join(cfg.DataDir, "testnet"))
-	cfg.DataDir = filepath.Join(cfg.DataDir, netName(activeNetParams))
+	oldTestNets = append(oldTestNets, filepath.Join(cfg.DataDir, "testnet2"))
+	cfg.DataDir = filepath.Join(cfg.DataDir, cfg.params.Name)
 	logRotator = nil
 	if !cfg.NoFileLogging {
 		// Append the network type to the log directory so it is "namespaced"
 		// per network in the same fashion as the data directory.
 		cfg.LogDir = cleanAndExpandPath(cfg.LogDir)
-		cfg.LogDir = filepath.Join(cfg.LogDir, netName(activeNetParams))
+		cfg.LogDir = filepath.Join(cfg.LogDir, cfg.params.Name)
+
+		var units int
+		for i, r := range cfg.LogSize {
+			if r < '0' || r > '9' {
+				units = i
+				break
+			}
+		}
+		invalidSize := func() (*config, []string, error) {
+			str := "%s: Invalid logsize: %v "
+			err := fmt.Errorf(str, funcName, cfg.LogSize)
+			return nil, nil, err
+		}
+		if units == 0 {
+			return invalidSize()
+		}
+		// Parsing a 32-bit number prevents 64-bit overflow after unit
+		// multiplication.
+		logsize, err := strconv.ParseInt(cfg.LogSize[:units], 10, 32)
+		if err != nil {
+			return invalidSize()
+		}
+		switch cfg.LogSize[units:] {
+		case "k", "K", "KiB":
+		case "m", "M", "MiB":
+			logsize <<= 10
+		case "g", "G", "GiB":
+			logsize <<= 20
+		default:
+			return invalidSize()
+		}
 
 		// Initialize log rotation.  After log rotation has been initialized, the
 		// logger variables may be used.
-		initLogRotator(filepath.Join(cfg.LogDir, defaultLogFilename))
+		initLogRotator(filepath.Join(cfg.LogDir, defaultLogFilename), logsize)
 	}
 
 	// Special show command to list supported subsystems and exit.
@@ -623,9 +914,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Parse, validate, and set debug log level(s).
 	if err := parseAndSetDebugLevels(cfg.DebugLevel); err != nil {
-		err := fmt.Errorf("%s: %v", funcName, err.Error())
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
+		err := fmt.Errorf("%s: %w", funcName, err)
 		return nil, nil, err
 	}
 
@@ -634,34 +923,23 @@ func loadConfig() (*config, []string, error) {
 		str := "%s: the specified database type [%v] is invalid -- " +
 			"supported types %v"
 		err := fmt.Errorf(str, funcName, cfg.DbType, knownDbTypes)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
-	// Validate format of profile, can be an address:port, or just a port.
+	// Enforce the minimum and maximum utxo cache max size.
+	if cfg.UtxoCacheMaxSize < minUtxoCacheMaxSize {
+		cfg.UtxoCacheMaxSize = minUtxoCacheMaxSize
+	} else if cfg.UtxoCacheMaxSize > maxUtxoCacheMaxSize {
+		cfg.UtxoCacheMaxSize = maxUtxoCacheMaxSize
+	}
+
+	// Validate format of profile address.  It may either be an address:port or
+	// just a port.  The port also must be between 1024 and 65535.
 	if cfg.Profile != "" {
-		// if profile is just a number, then add a default host of "127.0.0.1" such that Profile is a valid tcp address
-		if _, err := strconv.Atoi(cfg.Profile); err == nil {
-			cfg.Profile = net.JoinHostPort("127.0.0.1", cfg.Profile)
-		}
-
-		// check the Profile is a valid address
-		_, portStr, err := net.SplitHostPort(cfg.Profile)
-		if err != nil {
-			str := "%s: profile: %s"
+		cfg.Profile = portToLocalHostAddr(cfg.Profile)
+		if err := validateProfileAddr(cfg.Profile); err != nil {
+			str := "%s: profile: %w"
 			err := fmt.Errorf(str, funcName, err)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
-		}
-
-		// finally, check the port is in range
-		if port, _ := strconv.Atoi(portStr); port < 1024 || port > 65535 {
-			str := "%s: profile: address %s: port must be between 1024 and 65535"
-			err := fmt.Errorf(str, funcName, cfg.Profile)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
 			return nil, nil, err
 		}
 	}
@@ -670,40 +948,44 @@ func loadConfig() (*config, []string, error) {
 	if cfg.BanDuration < time.Second {
 		str := "%s: the banduration option may not be less than 1s -- parsed [%v]"
 		err := fmt.Errorf(str, funcName, cfg.BanDuration)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
+		return nil, nil, err
+	}
+
+	// Don't allow dialtimeout durations that are too short.
+	if cfg.DialTimeout < time.Second {
+		str := "%s: the dialtimeout option may not be less than 1s -- parsed [%v]"
+		err := fmt.Errorf(str, funcName, cfg.DialTimeout)
+		return nil, nil, err
+	}
+
+	// Don't allow peeridletimeout durations that are too short.
+	if cfg.PeerIdleTimeout < time.Second*15 {
+		str := "%s: the peeridletimeout option may not be less " +
+			"than 15s -- parsed [%v]"
+		err := fmt.Errorf(str, funcName, cfg.PeerIdleTimeout)
 		return nil, nil, err
 	}
 
 	// Validate any given whitelisted IP addresses and networks.
 	if len(cfg.Whitelists) > 0 {
-		var ip net.IP
-		cfg.whitelists = make([]*net.IPNet, 0, len(cfg.Whitelists))
-
+		cfg.whitelists = make([]netip.Prefix, 0, len(cfg.Whitelists))
 		for _, addr := range cfg.Whitelists {
-			_, ipnet, err := net.ParseCIDR(addr)
+			prefix, err := netip.ParsePrefix(addr)
 			if err != nil {
-				ip = net.ParseIP(addr)
-				if ip == nil {
-					str := "%s: the whitelist value of '%s' is invalid"
+				ip, err := netip.ParseAddr(addr)
+				if err != nil {
+					str := "%s: invalid whitelist value %q"
 					err = fmt.Errorf(str, funcName, addr)
-					fmt.Fprintln(os.Stderr, err)
-					fmt.Fprintln(os.Stderr, usageMessage)
 					return nil, nil, err
 				}
-				var bits int
-				if ip.To4() == nil {
-					// IPv6
+				bits := 32
+				if ip.Is6() {
 					bits = 128
-				} else {
-					bits = 32
 				}
-				ipnet = &net.IPNet{
-					IP:   ip,
-					Mask: net.CIDRMask(bits, bits),
-				}
+				prefix = netip.PrefixFrom(ip, bits)
 			}
-			cfg.whitelists = append(cfg.whitelists, ipnet)
+			prefix = prefix.Masked()
+			cfg.whitelists = append(cfg.whitelists, prefix)
 		}
 	}
 
@@ -712,8 +994,6 @@ func loadConfig() (*config, []string, error) {
 		str := "%s: the --addpeer and --connect options can not be " +
 			"mixed"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
@@ -723,9 +1003,9 @@ func loadConfig() (*config, []string, error) {
 		cfg.DisableListen = true
 	}
 
-	// Connect means no DNS seeding.
+	// Connect means no seeding.
 	if len(cfg.ConnectPeers) > 0 {
-		cfg.DisableDNSSeed = true
+		cfg.DisableSeeders = true
 	}
 
 	// Add the default listener if none were specified. The default
@@ -733,7 +1013,7 @@ func loadConfig() (*config, []string, error) {
 	// we are to connect to.
 	if len(cfg.Listeners) == 0 {
 		cfg.Listeners = []string{
-			net.JoinHostPort("", activeNetParams.DefaultPort),
+			net.JoinHostPort("", cfg.params.DefaultPort),
 		}
 	}
 
@@ -742,8 +1022,6 @@ func loadConfig() (*config, []string, error) {
 		str := "%s: --rpcuser and --rpclimituser must not specify the " +
 			"same username"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
@@ -752,15 +1030,28 @@ func loadConfig() (*config, []string, error) {
 		str := "%s: --rpcpass and --rpclimitpass must not specify the " +
 			"same password"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
-	// The RPC server is disabled if no username or password is provided.
-	if (cfg.RPCUser == "" || cfg.RPCPass == "") &&
+	// The RPC server is disabled if no username or password is provided
+	// under basic user/pass authentication.
+	if cfg.RPCAuthType == authTypeBasic &&
+		(cfg.RPCUser == "" || cfg.RPCPass == "") &&
 		(cfg.RPCLimitUser == "" || cfg.RPCLimitPass == "") {
 		cfg.DisableRPC = true
+	}
+
+	// Check to make sure RPC usernames and passwords are not provided under
+	// client cert authentiation.
+	if cfg.RPCAuthType == authTypeClientCert {
+		switch {
+		case cfg.RPCUser != "", cfg.RPCPass != "",
+			cfg.RPCLimitUser != "", cfg.RPCLimitPass != "":
+			str := "%s: RPC usernames and passwords are not allowed " +
+				"with --authtype=clientcert"
+			err := fmt.Errorf(str, funcName)
+			return nil, nil, err
+		}
 	}
 
 	// Default RPC to listen on localhost only.
@@ -771,7 +1062,7 @@ func loadConfig() (*config, []string, error) {
 		}
 		cfg.RPCListeners = make([]string, 0, len(addrs))
 		for _, addr := range addrs {
-			addr = net.JoinHostPort(addr, activeNetParams.rpcPort)
+			addr = net.JoinHostPort(addr, cfg.params.rpcPort)
 			cfg.RPCListeners = append(cfg.RPCListeners, addr)
 		}
 	}
@@ -780,24 +1071,36 @@ func loadConfig() (*config, []string, error) {
 		str := "%s: the rpcmaxwebsocketconcurrentrequests option may " +
 			"not be less than 0 -- parsed [%d]"
 		err := fmt.Errorf(str, funcName, cfg.RPCMaxConcurrentReqs)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
-	// Validate the the minrelaytxfee.
+	// Validate the minrelaytxfee.
 	cfg.minRelayTxFee, err = dcrutil.NewAmount(cfg.MinRelayTxFee)
 	if err != nil {
-		str := "%s: invalid minrelaytxfee: %v"
+		str := "%s: invalid minrelaytxfee: %w"
 		err := fmt.Errorf(str, funcName, err)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
+	}
+
+	// Warn on use of deprecated option to specify a minimum block size for
+	// low-fee/free transactions when creating a block.
+	if cfg.BlockMinSize != 0 {
+		fmt.Fprintln(os.Stderr, "The --blockminsize option is deprecated "+
+			"and will be removed in a future version of the software: please "+
+			"remove it from your config")
+	}
+
+	// Warn on use of deprecated option to specify a size for high-priority /
+	// low-fee transactions when creating a block.
+	if cfg.BlockPrioritySize != 0 {
+		fmt.Fprintln(os.Stderr, "The --blockprioritysize option is deprecated "+
+			"and will be removed in a future version of the software: please "+
+			"remove it from your config")
 	}
 
 	// Ensure the specified max block size is not larger than the network will
 	// allow.  1000 bytes is subtracted from the max to account for overhead.
-	blockMaxSizeMax := uint32(activeNetParams.MaximumBlockSizes[0]) - 1000
+	blockMaxSizeMax := uint32(cfg.params.MaximumBlockSizes[0]) - 1000
 	if cfg.BlockMaxSize < blockMaxSizeMin || cfg.BlockMaxSize >
 		blockMaxSizeMax {
 
@@ -805,54 +1108,22 @@ func loadConfig() (*config, []string, error) {
 			"and %d -- parsed [%d]"
 		err := fmt.Errorf(str, funcName, blockMaxSizeMin,
 			blockMaxSizeMax, cfg.BlockMaxSize)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
-	// Limit the max orphan count to a sane vlue.
+	// Limit the max orphan count to a sane value.
 	if cfg.MaxOrphanTxs < 0 {
 		str := "%s: the maxorphantx option may not be less than 0 " +
 			"-- parsed [%d]"
 		err := fmt.Errorf(str, funcName, cfg.MaxOrphanTxs)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
-
-	// Limit the block priority and minimum block sizes to max block size.
-	cfg.BlockPrioritySize = minUint32(cfg.BlockPrioritySize, cfg.BlockMaxSize)
-	cfg.BlockMinSize = minUint32(cfg.BlockMinSize, cfg.BlockMaxSize)
 
 	// --txindex and --droptxindex do not mix.
 	if cfg.TxIndex && cfg.DropTxIndex {
 		err := fmt.Errorf("%s: the --txindex and --droptxindex "+
 			"options may  not be activated at the same time",
 			funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
-		return nil, nil, err
-	}
-
-	// --addrindex and --dropaddrindex do not mix.
-	if cfg.AddrIndex && cfg.DropAddrIndex {
-		err := fmt.Errorf("%s: the --addrindex and --dropaddrindex "+
-			"options may not be activated at the same time",
-			funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
-		return nil, nil, err
-	}
-
-	// --addrindex and --droptxindex do not mix.
-	if cfg.AddrIndex && cfg.DropTxIndex {
-		err := fmt.Errorf("%s: the --addrindex and --droptxindex "+
-			"options may not be activated at the same time "+
-			"because the address index relies on the transaction "+
-			"index",
-			funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
@@ -860,48 +1131,16 @@ func loadConfig() (*config, []string, error) {
 	if !cfg.NoExistsAddrIndex && cfg.DropExistsAddrIndex {
 		err := fmt.Errorf("dropexistsaddrindex cannot be activated when " +
 			"existsaddressindex is on (try setting --noexistsaddrindex)")
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
-	// Check getwork keys are valid and saved parsed versions.
-	cfg.miningAddrs = make([]dcrutil.Address, 0, len(cfg.GetWorkKeys)+
-		len(cfg.MiningAddrs))
-	for _, strAddr := range cfg.GetWorkKeys {
-		addr, err := dcrutil.DecodeAddress(strAddr)
-		if err != nil {
-			str := "%s: getworkkey '%s' failed to decode: %v"
-			err := fmt.Errorf(str, funcName, strAddr, err)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
-		}
-		if !addr.IsForNet(activeNetParams.Params) {
-			str := "%s: getworkkey '%s' is on the wrong network"
-			err := fmt.Errorf(str, funcName, strAddr)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
-		}
-		cfg.miningAddrs = append(cfg.miningAddrs, addr)
-	}
-
 	// Check mining addresses are valid and saved parsed versions.
+	cfg.miningAddrs = make([]stdaddr.Address, 0, len(cfg.MiningAddrs))
 	for _, strAddr := range cfg.MiningAddrs {
-		addr, err := dcrutil.DecodeAddress(strAddr)
+		addr, err := stdaddr.DecodeAddress(strAddr, cfg.params.Params)
 		if err != nil {
-			str := "%s: mining address '%s' failed to decode: %v"
+			str := "%s: mining address '%s' failed to decode: %w"
 			err := fmt.Errorf(str, funcName, strAddr, err)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
-			return nil, nil, err
-		}
-		if !addr.IsForNet(activeNetParams.Params) {
-			str := "%s: mining address '%s' is on the wrong network"
-			err := fmt.Errorf(str, funcName, strAddr)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
 			return nil, nil, err
 		}
 		cfg.miningAddrs = append(cfg.miningAddrs, addr)
@@ -909,27 +1148,46 @@ func loadConfig() (*config, []string, error) {
 
 	// Ensure there is at least one mining address when the generate flag is
 	// set.
-	if cfg.Generate && len(cfg.MiningAddrs) == 0 {
+	if cfg.Generate && len(cfg.miningAddrs) == 0 {
 		str := "%s: the generate flag is set, but there are no mining " +
 			"addresses specified "
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
+	}
+
+	// Don't allow unsynchronized mining on mainnet.
+	if cfg.AllowUnsyncedMining && cfg.params == &mainNetParams {
+		str := "%s: allowunsyncedmining cannot be activated on mainnet"
+		err := fmt.Errorf(str, funcName)
+		return nil, nil, err
+	}
+
+	// Always allow unsynchronized mining on simnet and regnet.
+	if cfg.SimNet || cfg.RegNet {
+		cfg.AllowUnsyncedMining = true
 	}
 
 	// Add default port to all listener addresses if needed and remove
 	// duplicate addresses.
 	cfg.Listeners = normalizeAddresses(cfg.Listeners,
-		activeNetParams.DefaultPort)
+		cfg.params.DefaultPort, normalizeInterfaceAddrs)
 
 	// Add default port to all rpc listener addresses if needed and remove
 	// duplicate addresses.
 	cfg.RPCListeners = normalizeAddresses(cfg.RPCListeners,
-		activeNetParams.rpcPort)
+		cfg.params.rpcPort, normalizeInterfaceAddrs)
+
+	// The authtype config must be one of "basic" or "clientcert".
+	switch cfg.RPCAuthType {
+	case authTypeBasic, authTypeClientCert:
+	default:
+		err := fmt.Errorf("%s: invalid authtype option %q",
+			funcName, cfg.RPCAuthType)
+		return nil, nil, err
+	}
 
 	// Only allow TLS to be disabled if the RPC is bound to localhost
-	// addresses.
+	// addresses, and when client cert auth is not used.
 	if !cfg.DisableRPC && cfg.DisableTLS {
 		allowedTLSListeners := map[string]struct{}{
 			"localhost": {},
@@ -940,10 +1198,8 @@ func loadConfig() (*config, []string, error) {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
 				str := "%s: RPC listen interface '%s' is " +
-					"invalid: %v"
+					"invalid: %w"
 				err := fmt.Errorf(str, funcName, addr, err)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
 				return nil, nil, err
 			}
 			if _, ok := allowedTLSListeners[host]; !ok {
@@ -951,27 +1207,29 @@ func loadConfig() (*config, []string, error) {
 					"when binding RPC to non localhost " +
 					"addresses: %s"
 				err := fmt.Errorf(str, funcName, addr)
-				fmt.Fprintln(os.Stderr, err)
-				fmt.Fprintln(os.Stderr, usageMessage)
 				return nil, nil, err
 			}
+		}
+
+		if cfg.RPCAuthType == authTypeClientCert {
+			err := fmt.Errorf("%s: TLS may not be disabled with "+
+				"authtype=clientcert", funcName)
+			return nil, nil, err
 		}
 	}
 
 	// Add default port to all added peer addresses if needed and remove
 	// duplicate addresses.
 	cfg.AddPeers = normalizeAddresses(cfg.AddPeers,
-		activeNetParams.DefaultPort)
+		cfg.params.DefaultPort, normalizeInterfaceFirstAddr)
 	cfg.ConnectPeers = normalizeAddresses(cfg.ConnectPeers,
-		activeNetParams.DefaultPort)
+		cfg.params.DefaultPort, normalizeInterfaceFirstAddr)
 
 	// Tor stream isolation requires either proxy or onion proxy to be set.
 	if cfg.TorIsolation && cfg.Proxy == "" && cfg.OnionProxy == "" {
 		str := "%s: Tor stream isolation requires either proxy or " +
 			"onionproxy to be set"
 		err := fmt.Errorf(str, funcName)
-		fmt.Fprintln(os.Stderr, err)
-		fmt.Fprintln(os.Stderr, usageMessage)
 		return nil, nil, err
 	}
 
@@ -981,17 +1239,18 @@ func loadConfig() (*config, []string, error) {
 	// specified, the dial function is set to the proxy specific dial
 	// function and the lookup is set to use tor (unless --noonion is
 	// specified in which case the system DNS resolver is used).
-	cfg.dial = net.Dial
+	var d net.Dialer
+	cfg.dial = d.DialContext
 	cfg.lookup = net.LookupIP
 	if cfg.Proxy != "" {
-		_, _, err := net.SplitHostPort(cfg.Proxy)
+		host, port, err := net.SplitHostPort(cfg.Proxy)
 		if err != nil {
-			str := "%s: proxy address '%s' is invalid: %v"
+			str := "%s: proxy address '%s' is invalid: %w"
 			err := fmt.Errorf(str, funcName, cfg.Proxy, err)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
 			return nil, nil, err
 		}
+		cfg.Proxy = normalizeAddresses([]string{host}, port,
+			normalizeInterfaceFirstAddr)[0]
 
 		if cfg.TorIsolation &&
 			(cfg.ProxyUser != "" || cfg.ProxyPass != "") {
@@ -1005,10 +1264,10 @@ func loadConfig() (*config, []string, error) {
 			Password:     cfg.ProxyPass,
 			TorIsolation: cfg.TorIsolation,
 		}
-		cfg.dial = proxy.Dial
+		cfg.dial = proxy.DialContext
 		if !cfg.NoOnion {
 			cfg.lookup = func(host string) ([]net.IP, error) {
-				return connmgr.TorLookupIP(host, cfg.Proxy)
+				return addrmgr.TorLookupIP(context.Background(), host, cfg.Proxy)
 			}
 		}
 	}
@@ -1022,14 +1281,14 @@ func loadConfig() (*config, []string, error) {
 	// This allows .onion address traffic to be routed through a different
 	// proxy than normal traffic.
 	if cfg.OnionProxy != "" {
-		_, _, err := net.SplitHostPort(cfg.OnionProxy)
+		host, port, err := net.SplitHostPort(cfg.OnionProxy)
 		if err != nil {
-			str := "%s: Onion proxy address '%s' is invalid: %v"
+			str := "%s: Onion proxy address '%s' is invalid: %w"
 			err := fmt.Errorf(str, funcName, cfg.OnionProxy, err)
-			fmt.Fprintln(os.Stderr, err)
-			fmt.Fprintln(os.Stderr, usageMessage)
 			return nil, nil, err
 		}
+		cfg.OnionProxy = normalizeAddresses([]string{host}, port,
+			normalizeInterfaceFirstAddr)[0]
 
 		if cfg.TorIsolation &&
 			(cfg.OnionProxyUser != "" || cfg.OnionProxyPass != "") {
@@ -1038,17 +1297,17 @@ func loadConfig() (*config, []string, error) {
 				"credentials ")
 		}
 
-		cfg.oniondial = func(a, b string) (net.Conn, error) {
+		cfg.oniondial = func(ctx context.Context, a, b string) (net.Conn, error) {
 			proxy := &socks.Proxy{
 				Addr:         cfg.OnionProxy,
 				Username:     cfg.OnionProxyUser,
 				Password:     cfg.OnionProxyPass,
 				TorIsolation: cfg.TorIsolation,
 			}
-			return proxy.Dial(a, b)
+			return proxy.DialContext(ctx, a, b)
 		}
 		cfg.onionlookup = func(host string) ([]net.IP, error) {
-			return connmgr.TorLookupIP(host, cfg.OnionProxy)
+			return addrmgr.TorLookupIP(context.Background(), host, cfg.OnionProxy)
 		}
 	} else {
 		cfg.oniondial = cfg.dial
@@ -1058,7 +1317,7 @@ func loadConfig() (*config, []string, error) {
 	// Specifying --noonion means the onion address dial and DNS resolution
 	// (lookup) functions result in an error.
 	if cfg.NoOnion {
-		cfg.oniondial = func(a, b string) (net.Conn, error) {
+		cfg.oniondial = func(ctx context.Context, a, b string) (net.Conn, error) {
 			return nil, errors.New("tor has been disabled")
 		}
 		cfg.onionlookup = func(a string) ([]net.IP, error) {
@@ -1073,6 +1332,17 @@ func loadConfig() (*config, []string, error) {
 				" found (%v) and can probably be removed.",
 				oldDir)
 		}
+	}
+
+	// Parse information regarding the state of the supported network
+	// interfaces.
+	if err := parseNetworkInterfaces(&cfg); err != nil {
+		return nil, nil, err
+	}
+
+	// Prevent using an unsupported curve.
+	if _, err := tlsCurve(cfg.TLSCurve); err != nil {
+		return nil, nil, err
 	}
 
 	// Warn about missing config file only after all other configuration is
@@ -1090,14 +1360,14 @@ func loadConfig() (*config, []string, error) {
 // example, .onion addresses will be dialed using the onion specific proxy if
 // one was specified, but will otherwise use the normal dial function (which
 // could itself use a proxy or not).
-func dcrdDial(addr net.Addr) (net.Conn, error) {
-	if strings.Contains(addr.String(), ".onion:") {
-		return cfg.oniondial(addr.Network(), addr.String())
+func dcrdDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if strings.Contains(addr, ".onion:") {
+		return cfg.oniondial(ctx, network, addr)
 	}
-	return cfg.dial(addr.Network(), addr.String())
+	return cfg.dial(ctx, network, addr)
 }
 
-// dcrdLookup returns the correct DNS lookup function to use depending on the
+// dcrdLookup invokes the correct DNS lookup function to use depending on the
 // passed host and configuration options.  For example, .onion addresses will be
 // resolved using the onion specific proxy if one was specified, but will
 // otherwise treat the normal proxy as tor unless --noonion was specified in
@@ -1109,4 +1379,17 @@ func dcrdLookup(host string) ([]net.IP, error) {
 		return cfg.onionlookup(host)
 	}
 	return cfg.lookup(host)
+}
+
+// tlsCurve returns the correct curve given a config option indicating the
+// curve to use or an error if the curve does not exist.
+func tlsCurve(curve string) (elliptic.Curve, error) {
+	switch curve {
+	case "P-521":
+		return elliptic.P521(), nil
+	case "P-256":
+		return elliptic.P256(), nil
+	default:
+		return nil, fmt.Errorf("unsupported curve %s", curve)
+	}
 }

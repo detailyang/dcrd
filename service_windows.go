@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,12 +8,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/btcsuite/winsvc/eventlog"
-	"github.com/btcsuite/winsvc/mgr"
-	"github.com/btcsuite/winsvc/svc"
+	"github.com/decred/dcrd/internal/version"
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
+	"golang.org/x/sys/windows/svc/mgr"
 )
 
 const (
@@ -26,7 +26,7 @@ const (
 	svcDisplayName = "Dcrd Service"
 
 	// svcDesc is the description of the service.
-	svcDesc = "Downloads and stays synchronized with the decred block " +
+	svcDesc = "Downloads and stays synchronized with the Decred block " +
 		"chain and provides chain services to applications."
 )
 
@@ -35,9 +35,9 @@ var elog *eventlog.Log
 
 // logServiceStartOfDay logs information about dcrd when the main server has
 // been started to the Windows event log.
-func logServiceStartOfDay(srvr *server) {
+func logServiceStartOfDay(cfg *config) {
 	var message string
-	message += fmt.Sprintf("Version %s\n", version())
+	message += fmt.Sprintf("Version %s\n", version.String())
 	message += fmt.Sprintf("Configuration directory: %s\n", cfg.HomeDir)
 	message += fmt.Sprintf("Configuration file: %s\n", cfg.ConfigFile)
 	message += fmt.Sprintf("Data directory: %s\n", cfg.DataDir)
@@ -60,19 +60,16 @@ func (s *dcrdService) Execute(args []string, r <-chan svc.ChangeRequest, changes
 
 	// Start dcrdMain in a separate goroutine so the service can start
 	// quickly.  Shutdown (along with a potential error) is reported via
-	// doneChan.  serverChan is notified with the main server instance once
-	// it is started so it can be gracefully stopped.
+	// doneChan.
 	doneChan := make(chan error)
-	serverChan := make(chan *server)
 	go func() {
-		err := dcrdMain(serverChan)
+		err := dcrdMain()
 		doneChan <- err
 	}()
 
 	// Service is now started.
 	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 
-	var mainServer *server
 loop:
 	for {
 		select {
@@ -94,9 +91,8 @@ loop:
 					"request #%d.", c))
 			}
 
-		case srvr := <-serverChan:
-			mainServer = srvr
-			logServiceStartOfDay(mainServer)
+		case cfg := <-serviceStartOfDayChan:
+			logServiceStartOfDay(cfg)
 
 		case err := <-doneChan:
 			if err != nil {
@@ -115,17 +111,10 @@ loop:
 // be done by the msi installer, but it is provided here since it can be useful
 // for development.
 func installService() error {
-	// Get the path of the current executable.  This is needed because
-	// os.Args[0] can vary depending on how the application was launched.
-	// For example, under cmd.exe it will only be the name of the app
-	// without the path or extension, but under mingw it will be the full
-	// path including the extension.
-	exePath, err := filepath.Abs(os.Args[0])
+	// The full path to the current executable.
+	exePath, err := os.Executable()
 	if err != nil {
 		return err
-	}
-	if filepath.Ext(exePath) == "" {
-		exePath += ".exe"
 	}
 
 	// Connect to the windows service manager.
@@ -154,15 +143,10 @@ func installService() error {
 
 	// Support events to the event log using the standard "standard" Windows
 	// EventCreate.exe message file.  This allows easy logging of custom
-	// messges instead of needing to create our own message catalog.
+	// messages instead of needing to create our own message catalog.
 	eventlog.Remove(svcName)
 	eventsSupported := uint32(eventlog.Error | eventlog.Warning | eventlog.Info)
-	err = eventlog.InstallAsEventCreate(svcName, eventsSupported)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return eventlog.InstallAsEventCreate(svcName, eventsSupported)
 }
 
 // removeService attempts to uninstall the dcrd service.  Typically this should
@@ -185,12 +169,7 @@ func removeService() error {
 	defer service.Close()
 
 	// Remove the service.
-	err = service.Delete()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return service.Delete()
 }
 
 // startService attempts to start the dcrd service.
@@ -204,13 +183,13 @@ func startService() error {
 
 	service, err := serviceManager.OpenService(svcName)
 	if err != nil {
-		return fmt.Errorf("could not access service: %v", err)
+		return fmt.Errorf("could not access service: %w", err)
 	}
 	defer service.Close()
 
-	err = service.Start(os.Args)
+	err = service.Start(os.Args...)
 	if err != nil {
-		return fmt.Errorf("could not start service: %v", err)
+		return fmt.Errorf("could not start service: %w", err)
 	}
 
 	return nil
@@ -229,13 +208,13 @@ func controlService(c svc.Cmd, to svc.State) error {
 
 	service, err := serviceManager.OpenService(svcName)
 	if err != nil {
-		return fmt.Errorf("could not access service: %v", err)
+		return fmt.Errorf("could not access service: %w", err)
 	}
 	defer service.Close()
 
 	status, err := service.Control(c)
 	if err != nil {
-		return fmt.Errorf("could not send control=%d: %v", c, err)
+		return fmt.Errorf("could not send control=%d: %w", c, err)
 	}
 
 	// Send the control message.
@@ -248,8 +227,7 @@ func controlService(c svc.Cmd, to svc.State) error {
 		time.Sleep(300 * time.Millisecond)
 		status, err = service.Query()
 		if err != nil {
-			return fmt.Errorf("could not retrieve service "+
-				"status: %v", err)
+			return fmt.Errorf("could not retrieve service status: %w", err)
 		}
 	}
 
@@ -288,11 +266,11 @@ func performServiceCommand(command string) error {
 func serviceMain() (bool, error) {
 	// Don't run as a service if we're running interactively (or that can't
 	// be determined due to an error).
-	isInteractive, err := svc.IsAnInteractiveSession()
+	isService, err := svc.IsWindowsService()
 	if err != nil {
 		return false, err
 	}
-	if isInteractive {
+	if !isService {
 		return false, nil
 	}
 

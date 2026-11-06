@@ -7,6 +7,9 @@
 4.2. [Testing](#Testing)<br />
 4.3. [Code Documentation and Commenting](#CodeDocumentation)<br />
 4.4. [Model Git Commit Messages](#ModelGitCommitMessages)<br />
+4.5. [Handling Module Breaking Changes](#HandlingModuleBreakingChanges)<br />
+4.6. [Handling Backports](#HandlingBackports)<br />
+4.7. [Maximum Line Length and Wrapping](#MaximumLineLengthAndWrapping)<br />
 5. [Code Approval Process](#CodeApproval)<br />
 5.1 [Code Review](#CodeReview)<br />
 5.2 [Rework Code (if needed)](#CodeRework)<br />
@@ -50,13 +53,14 @@ the following basic qualifications you will likely find it quite difficult to
 contribute.
 
 - A reasonable understanding of bitcoin at a high level (see the
-  [Required Reading](#ReqReading) section for the original white paper)
-- Experience in some type of C-like language
-- An understanding of data structures and their performance implications
-- Familiarity with unit testing
-- Debugging experience
+  [Required Reading](#ReqReading) section for the original white paper).
+- Experience in some type of C-like language.
+- An understanding of data structures and their performance implications.
+- Familiarity with unit testing.
+- Debugging experience.
 - Ability to understand not only the area you are making a change in, but also
-  the code your change relies on, and the code which relies on your changed code
+  the code your change relies on, and the code which relies on your changed
+  code.
 
 Building on top of those core competencies, the recommended skill set largely
 depends on the specific areas you are looking to contribute to.  For example,
@@ -68,11 +72,12 @@ security and performance implications.
 
 ### 3. Required Reading
 
-- [Effective Go](http://golang.org/doc/effective_go.html) - The entire dcrd
+- [Effective Go](https://golang.org/doc/effective_go.html) - The entire dcrd
   suite follows the guidelines in this document.  For your code to be accepted,
   it must follow the guidelines therein.
-- [Original Satoshi Whitepaper](http://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=1&cad=rja&ved=0CCkQFjAA&url=http%3A%2F%2Fbitcoin.org%2Fbitcoin.pdf&ei=os3VUuH8G4SlsASV74GoAg&usg=AFQjCNEipPLigou_1MfB7DQjXCNdlylrBg&sig2=FaHDuT5z36GMWDEnybDJLg&bvm=bv.59378465,d.b2I) - This is the white paper that started it all.  Having a solid
-  foundation to build on will make the code much more comprehensible.
+- [Original Satoshi Whitepaper](https://decred.org/research/nakamoto2008.pdf) - 
+  This is the white paper that started it all.  Having a solid foundation to 
+  build on will make the code much more comprehensible.
 
 <a name="DevelopmentPractices" />
 
@@ -94,16 +99,16 @@ reviewable commits.
 This approach has several benefits:
 
 - Announcing your plans to work on a feature **before** you begin work avoids
-  duplicate work
+  duplicate work.
 - It permits discussions which can help you achieve your goals in a way that is
-  consistent with the existing architecture
+  consistent with the existing architecture.
 - It minimizes the chances of you spending time and energy on a change that
   might not fit with the consensus of the community or existing architecture and
-  potentially be rejected as a result
+  potentially be rejected as a result.
 - Incremental development helps ensure you are on the right track with regards
-  to the rest of the community
+  to the rest of the community.
 - The quicker your changes are merged to master, the less time you will need to
-  spend rebasing and otherwise trying to keep up with the main code base
+  spend rebasing and otherwise trying to keep up with the main code base.
 
 <a name="Testing" />
 
@@ -123,14 +128,20 @@ code works correctly when it is fed correct data as well as incorrect data
 
 Go provides an excellent test framework that makes writing test code and
 checking coverage statistics straight forward.  For more information about the
-test coverage tools, see the [golang cover blog post](http://blog.golang.org/cover).
+test coverage tools, see the [Golang cover blog post](https://blog.golang.org/cover).
+
+A simple way to check the coverage of a package and all its functions is to call
+```
+go test -coverprofile=cov.out; go tool cover -html=cov.out
+```
+in the package directory.
 
 A quick summary of test practices follows:
 - All new code should be accompanied by tests that ensure the code behaves
   correctly when given expected values, and, perhaps even more importantly, that
-  it handles errors gracefully
+  it handles errors gracefully.
 - When you fix a bug, it should be accompanied by tests which exercise the bug
-  to both prove it has been resolved and to prevent future regressions
+  to both prove it has been resolved and to prevent future regressions.
 
 <a name="CodeDocumentation" />
 
@@ -139,13 +150,13 @@ A quick summary of test practices follows:
 - At a minimum every function must be commented with its intended purpose and
   any assumptions that it makes
   - Function comments must always begin with the name of the function per
-    [Effective Go](http://golang.org/doc/effective_go.html)
+    [Effective Go](https://golang.org/doc/effective_go.html).
   - Function comments should be complete sentences since they allow a wide
-    variety of automated presentations such as [godoc.org](https://godoc.org)
+    variety of automated presentations such as [pkg.go.dev](https://pkg.go.dev).
   - The general rule of thumb is to look at it as if you were completely
     unfamiliar with the code and ask yourself, would this give me enough
-	information to understand what this function does and how I'd probably want
-	to use it?
+    information to understand what this function does and how I'd probably want
+    to use it?
 - Exported functions should also include detailed information the caller of the
   function will likely need to know and/or understand:<br /><br />
 **WRONG**
@@ -207,8 +218,12 @@ comment can make.
 ### 4.4 Model Git Commit Messages
 
 This project prefers to keep a clean commit history with well-formed commit
-messages.  This section illustrates a model commit message and provides a bit
-of background for it.  This content was originally created by Tim Pope and made
+messages. Commit messages should usually be multi-line, fully descriptive, and
+self-contained. Further, since this project deliberately avoids relying on
+GitHub to store information permanently, good commit messages are required.
+
+This section illustrates a model commit message and provides a bit of
+background for it.  This content was originally created by Tim Pope and made
 available on his website, however that website is no longer active, so it is
 being provided here.
 
@@ -236,22 +251,22 @@ Further paragraphs come after blank lines.
 - Use a hanging indent
 ```
 
-The commit prefix is always of the form `prefix: `. It is for the sole  
-purpose of indicating which package or component was touched in a  
-commit.  
+The commit prefix is always of the form `prefix: `. It is for the sole
+purpose of indicating which package or component was touched in a
+commit.
 
 Here is how the right prefix for a commit is chosen.
-- If a commit modifies a component in the main package  
+- If a commit modifies a component in the main package
   (eg. `blocklogger`) use the component name as the commit prefix.
-- If a commit modifies a component in any of the packages besides the main  
+- If a commit modifies a component in any of the packages besides the main
   package use the package name as the commit prefix (eg. `dcrjson`).
-- If a commit modifies components in multiple packages use the word `multi`  
+- If a commit modifies components in multiple packages use the word `multi`
   as the commit prefix.
 
 Here are some of the reasons why wrapping your commit messages to 72 columns is
 a good thing.
 
-- git log doesn’t do any special special wrapping of the commit messages. With
+- git log doesn’t do any special wrapping of the commit messages. With
   the default pager of less -S, this means your paragraphs flow far off the edge
   of the screen, making them difficult to read. On an 80 column terminal, if we
   subtract 4 columns for the indent on the left and 4 more for symmetry on the
@@ -260,6 +275,63 @@ a good thing.
   using the messages for the message body.  Good email netiquette dictates we
   wrap our plain text emails such that there’s room for a few levels of nested
   reply indicators without overflow in an 80 column terminal.
+
+Since this repository will not necessarily be hosted permanently by GitHub,
+git commit messages should never link to other issues or PRs. They should only
+ever describe their own content.
+
+However, PR descriptions in GitHub can *and should* be edited to reference
+other issues, PRs, or discussion threads.
+
+<a name="HandlingModuleBreakingChanges" />
+
+### 4.5 Handling Module Breaking Changes
+
+Pull requests that introduce breaking changes to modules must ensure that
+modules that depend on the change are updated to reference newly bumped module
+versions.  The purpose of this is to improve the release process by handling
+version updates with the pull request that introduces it instead of waiting
+until release.
+
+The request submitter should ensure the following steps are covered whenever a
+new breaking change to a module's API is introduced:
+
+- Bump the major version in the `go.mod` of the affected module if not already
+  done since the last release tag. Note that v1 modules are stabilized even
+  without a release, breaking changes to such modules will require a major
+  version bump as well.
+- Add a replacement to the `go.mod` in the main module if not already done since
+  the last release tag.
+- Update all imports in the repo to use the new major version as necessary.
+  - Make necessary modifications to allow all other modules to use the new
+  version in the same commit.
+- Repeat the process for any other modules the require a new major as a result
+  of consuming the new major(s).
+
+<a name="HandlingBackports" />
+
+### 4.6 Handling Backports
+
+Backported pull requests are required to reference the pull request being 
+applied to a prior release. The applied pull request number is expected to be
+indicated in the description of the backported pull request. The pull request
+title and commits are also required to clearly indicate they are a backport by 
+prefixing with the release version being backported to:
+
+```
+[release-vX.Y] prefix: Short summary of changes (max 50 chars)
+```
+
+The commit format detailed in [Model Git Commit Messages](#ModelGitCommitMessages) 
+is expected for backport commit messages as well.
+
+<a name="MaximumLineLengthAndWrapping" />
+
+### 4.7 Maximum Line Length and Wrapping
+
+Lines are generally wrapped at 80 columns, with tabs counted as 4 columns,
+unless it makes sense to be longer for readability purposes.  This is a
+guideline for consistency among contributors and is not strictly enforced.
 
 <a name="CodeApproval" />
 
@@ -337,7 +409,8 @@ Rejoice as you will now be listed as a [contributor](https://github.com/decred/d
 
 ### 6.1. Contribution Checklist
 
-- [&nbsp;&nbsp;] All changes are Go version 1.3 compliant
+- [&nbsp;&nbsp;] All changes are compliant with the latest version of Go and the
+  one prior to it
 - [&nbsp;&nbsp;] The code being submitted is commented according to the
   [Code Documentation and Commenting](#CodeDocumentation) section
 - [&nbsp;&nbsp;] For new code: Code is accompanied by tests which exercise both

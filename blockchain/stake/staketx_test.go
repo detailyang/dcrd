@@ -1,34 +1,65 @@
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package stake_test
+package stake
 
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"math/rand"
 	"reflect"
 	"testing"
 
-	"github.com/decred/dcrd/blockchain/stake"
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/txscript/v4"
+	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
 )
 
+// hexToBytes converts the passed hex string into bytes and will panic if there
+// is an error.  This is only provided for the hard-coded constants so errors in
+// the source code can be detected. It will only (and must only) be called with
+// hard-coded values.
+func hexToBytes(s string) []byte {
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		panic("invalid hex in source file: " + s)
+	}
+	return b
+}
+
+// mustParseHash converts the passed big-endian hex string into a
+// chainhash.Hash and will panic if there is an error.  It only differs from the
+// one available in chainhash in that it will panic so errors in the source code
+// be detected.  It will only (and must only) be called with hard-coded, and
+// therefore known good, hashes.
+func mustParseHash(s string) *chainhash.Hash {
+	hash, err := chainhash.NewHashFromStr(s)
+	if err != nil {
+		panic("invalid hash in source file: " + s)
+	}
+	return hash
+}
+
 // SSTX TESTING -------------------------------------------------------------------
 
-func TestIsSStx(t *testing.T) {
+// TestSStx ensures the CheckSStx and IsSStx functions correctly recognize stake
+// submission transactions.
+func TestSStx(t *testing.T) {
 	var sstx = dcrutil.NewTx(sstxMsgTx)
 	sstx.SetTree(wire.TxTreeStake)
 	sstx.SetIndex(0)
 
-	test, err := stake.IsSStx(sstx.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSTx should have returned true,<nil> but instead returned %v"+
-			",%v", test, err)
+	err := CheckSStx(sstx.MsgTx())
+	if err != nil {
+		t.Errorf("CheckSStx: unexpected err: %v", err)
+	}
+	if !IsSStx(sstx.MsgTx()) {
+		t.Errorf("IsSStx claimed a valid sstx is invalid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -52,14 +83,18 @@ func TestIsSStx(t *testing.T) {
 	sstx.SetTree(wire.TxTreeStake)
 	sstx.SetIndex(0)
 
-	test, err = stake.IsSStx(sstx.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSTx should have returned true,<nil> but instead returned %v"+
-			",%v", test, err)
+	err = CheckSStx(sstx.MsgTx())
+	if err != nil {
+		t.Errorf("CheckSStx: unexpected err: %v", err)
+	}
+	if !IsSStx(sstx.MsgTx()) {
+		t.Errorf("IsSStx claimed a valid sstx is invalid")
 	}
 }
 
-func TestIsSSTxErrors(t *testing.T) {
+// TestSSTxErrors ensures the CheckSStx and IsSStx functions correctly identify
+// errors in stake submission transactions and does not report them as valid.
+func TestSSTxErrors(t *testing.T) {
 	// Initialize the buffer for later manipulation
 	var buf bytes.Buffer
 	buf.Grow(sstxMsgTx.SerializeSize())
@@ -76,11 +111,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxExtraInputs.SetTree(wire.TxTreeStake)
 	sstxExtraInputs.SetIndex(0)
 
-	test, err := stake.IsSStx(sstxExtraInputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxTooManyInputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxTooManyInputs, test, err)
+	err = CheckSStx(sstxExtraInputs.MsgTx())
+	if !errors.Is(err, ErrSStxTooManyInputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxTooManyInputs, err)
+	}
+	if IsSStx(sstxExtraInputs.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -90,11 +127,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxExtraOutputs.SetTree(wire.TxTreeStake)
 	sstxExtraOutputs.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxExtraOutputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxTooManyOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxTooManyOutputs, test, err)
+	err = CheckSStx(sstxExtraOutputs.MsgTx())
+	if !errors.Is(err, ErrSStxTooManyOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxTooManyOutputs, err)
+	}
+	if IsSStx(sstxExtraOutputs.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -119,11 +158,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxUntaggedOut.SetTree(wire.TxTreeStake)
 	sstxUntaggedOut.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxUntaggedOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxUntaggedOut.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxUntaggedOut.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -133,11 +174,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxInsOutsMismatched.SetTree(wire.TxTreeStake)
 	sstxInsOutsMismatched.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxInsOutsMismatched.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInOutProportions {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInOutProportions, test, err)
+	err = CheckSStx(sstxInsOutsMismatched.MsgTx())
+	if !errors.Is(err, ErrSStxInOutProportions) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInOutProportions, err)
+	}
+	if IsSStx(sstxInsOutsMismatched.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -146,11 +189,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxBadVerOut.SetTree(wire.TxTreeStake)
 	sstxBadVerOut.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxBadVerOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxBadVerOut.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxBadVerOut.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -160,11 +205,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxNoNullData.SetTree(wire.TxTreeStake)
 	sstxNoNullData.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxNoNullData.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxNoNullData.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxNoNullData.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -174,11 +221,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxNullDataMis.SetTree(wire.TxTreeStake)
 	sstxNullDataMis.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxNullDataMis.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxNullDataMis.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxNullDataMis.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -208,11 +257,13 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxWrongPKHLength.SetTree(wire.TxTreeStake)
 	sstxWrongPKHLength.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxWrongPKHLength.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxWrongPKHLength.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxWrongPKHLength.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -243,25 +294,31 @@ func TestIsSSTxErrors(t *testing.T) {
 	sstxWrongPrefix.SetTree(wire.TxTreeStake)
 	sstxWrongPrefix.SetIndex(0)
 
-	test, err = stake.IsSStx(sstxWrongPrefix.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxInvalidOutputs {
-		t.Errorf("IsSSTx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSStxInvalidOutputs, test, err)
+	err = CheckSStx(sstxWrongPrefix.MsgTx())
+	if !errors.Is(err, ErrSStxInvalidOutputs) {
+		t.Errorf("CheckSStx should have returned %v but instead returned %v",
+			ErrSStxInvalidOutputs, err)
+	}
+	if IsSStx(sstxWrongPrefix.MsgTx()) {
+		t.Errorf("IsSStx claimed an invalid sstx is valid")
 	}
 }
 
 // SSGEN TESTING ------------------------------------------------------------------
 
-func TestIsSSGen(t *testing.T) {
+// TestSSGen ensures the CheckSSGen and IsSSGen functions correctly recognize
+// stake submission generation transactions.
+func TestSSGen(t *testing.T) {
 	var ssgen = dcrutil.NewTx(ssgenMsgTx)
 	ssgen.SetTree(wire.TxTreeStake)
 	ssgen.SetIndex(0)
 
-	test, err := stake.IsSSGen(ssgen.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSGen should have returned true,<nil> but instead returned %v"+
-			",%v", test, err)
+	err := CheckSSGen(ssgen.MsgTx())
+	if err != nil {
+		t.Errorf("IsSSGen: unexpected err: %v", err)
+	}
+	if !IsSSGen(ssgen.MsgTx()) {
+		t.Errorf("IsSSGen claimed a valid ssgen is invalid")
 	}
 
 	// Test for an OP_RETURN VoteBits push of the maximum size
@@ -284,15 +341,19 @@ func TestIsSSGen(t *testing.T) {
 	ssgen.SetIndex(0)
 	ssgen.MsgTx().TxOut[1].PkScript = biggestPush
 
-	test, err = stake.IsSSGen(ssgen.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSGen should have returned true,<nil> but instead returned %v"+
-			",%v", test, err)
+	err = CheckSSGen(ssgen.MsgTx())
+	if err != nil {
+		t.Errorf("IsSSGen: unexpected err: %v", err)
 	}
-
+	if !IsSSGen(ssgen.MsgTx()) {
+		t.Errorf("IsSSGen claimed a valid ssgen is invalid")
+	}
 }
 
-func TestIsSSGenErrors(t *testing.T) {
+// TestSSGenErrors ensures the CheckSSGen and IsSSGen functions correctly
+// identify errors in stake submission generation transactions and does not
+// report them as valid.
+func TestSSGenErrors(t *testing.T) {
 	// Initialize the buffer for later manipulation
 	var buf bytes.Buffer
 	buf.Grow(ssgenMsgTx.SerializeSize())
@@ -309,11 +370,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenExtraInputs.SetTree(wire.TxTreeStake)
 	ssgenExtraInputs.SetIndex(0)
 
-	test, err := stake.IsSSGen(ssgenExtraInputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenWrongNumInputs {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenWrongNumInputs, test, err)
+	err = CheckSSGen(ssgenExtraInputs.MsgTx())
+	if !errors.Is(err, ErrSSGenWrongNumInputs) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenWrongNumInputs, err)
+	}
+	if IsSSGen(ssgenExtraInputs.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -323,11 +386,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenExtraOutputs.SetTree(wire.TxTreeStake)
 	ssgenExtraOutputs.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenExtraOutputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenTooManyOutputs {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenTooManyOutputs, test, err)
+	err = CheckSSGen(ssgenExtraOutputs.MsgTx())
+	if !errors.Is(err, ErrSSGenTooManyOutputs) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenTooManyOutputs, err)
+	}
+	if IsSSGen(ssgenExtraOutputs.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -337,11 +402,30 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenStakeBaseWrong.SetTree(wire.TxTreeStake)
 	ssgenStakeBaseWrong.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenStakeBaseWrong.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenNoStakebase {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenNoStakebase, test, err)
+	err = CheckSSGen(ssgenStakeBaseWrong.MsgTx())
+	if !errors.Is(err, ErrSSGenNoStakebase) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenNoStakebase, err)
+	}
+	if IsSSGen(ssgenStakeBaseWrong.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// ---------------------------------------------------------------------------
+	// Test for wrong index on the ticket input.
+
+	var ssgenWrongIndex = dcrutil.NewTxDeep(ssgenMsgTx)
+	ssgenWrongIndex.SetTree(wire.TxTreeStake)
+	ssgenWrongIndex.SetIndex(0)
+	ssgenWrongIndex.MsgTx().TxIn[1].PreviousOutPoint.Index = 1
+
+	err = CheckSSGen(ssgenWrongIndex.MsgTx())
+	if !errors.Is(err, ErrSSGenWrongIndex) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenWrongIndex, err)
+	}
+	if IsSSGen(ssgenWrongIndex.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -367,11 +451,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongTreeIns.SetTree(wire.TxTreeStake)
 	ssgenWrongTreeIns.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongTreeIns.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenWrongTxTree {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenWrongTxTree, test, err)
+	err = CheckSSGen(ssgenWrongTreeIns.MsgTx())
+	if !errors.Is(err, ErrSSGenWrongTxTree) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenWrongTxTree, err)
+	}
+	if IsSSGen(ssgenWrongTreeIns.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -380,11 +466,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenTxBadVerOut.SetTree(wire.TxTreeStake)
 	ssgenTxBadVerOut.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenTxBadVerOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadGenOuts {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadGenOuts, test, err)
+	err = CheckSSGen(ssgenTxBadVerOut.MsgTx())
+	if !errors.Is(err, ErrSSGenBadGenOuts) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadGenOuts, err)
+	}
+	if IsSSGen(ssgenTxBadVerOut.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -394,12 +482,15 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongZeroethOut.SetTree(wire.TxTreeStake)
 	ssgenWrongZeroethOut.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongZeroethOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenNoReference {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenNoReference, test, err)
+	err = CheckSSGen(ssgenWrongZeroethOut.MsgTx())
+	if !errors.Is(err, ErrSSGenNoReference) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenNoReference, err)
 	}
+	if IsSSGen(ssgenWrongZeroethOut.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
 	// ---------------------------------------------------------------------------
 	// Test for too short of an OP_RETURN push being given in the 0th tx out
 
@@ -433,11 +524,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongDataPush0Length.SetTree(wire.TxTreeStake)
 	ssgenWrongDataPush0Length.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongDataPush0Length.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadReference {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadReference, test, err)
+	err = CheckSSGen(ssgenWrongDataPush0Length.MsgTx())
+	if !errors.Is(err, ErrSSGenBadReference) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadReference, err)
+	}
+	if IsSSGen(ssgenWrongDataPush0Length.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -452,7 +545,7 @@ func TestIsSSGenErrors(t *testing.T) {
 			0x52, 0xde, 0x3d, 0x7c, 0x52, 0xde, 0x3d, 0x7c,
 			0x00, 0xe3, 0x23, 0x21,
 		},
-		[]byte{ // This uses an OP_PUSHDATA_1 35-byte push to achieve 36 bytes
+		[]byte{ // This uses an OP_PUSHDATA1 35-byte push to achieve 36 bytes
 			0x26, 0x6a, 0x4c, 0x23,
 			0x94, 0x8c, 0x76, 0x5a, 0x69, 0x14, 0xd4, 0x3f,
 			0x2a, 0x7a, 0xc1, 0x77, 0xda, 0x2c, 0x2f, 0x6b,
@@ -473,11 +566,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongNullData0Prefix.SetTree(wire.TxTreeStake)
 	ssgenWrongNullData0Prefix.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongNullData0Prefix.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadReference {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadReference, test, err)
+	err = CheckSSGen(ssgenWrongNullData0Prefix.MsgTx())
+	if !errors.Is(err, ErrSSGenBadReference) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadReference, err)
+	}
+	if IsSSGen(ssgenWrongNullData0Prefix.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -487,12 +582,15 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongFirstOut.SetTree(wire.TxTreeStake)
 	ssgenWrongFirstOut.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongFirstOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenNoVotePush {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenNoVotePush, test, err)
+	err = CheckSSGen(ssgenWrongFirstOut.MsgTx())
+	if !errors.Is(err, ErrSSGenNoVotePush) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenNoVotePush, err)
 	}
+	if IsSSGen(ssgenWrongFirstOut.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
 	// ---------------------------------------------------------------------------
 	// Test for too short of an OP_RETURN push being given in the 1st tx out
 	testDataPush1Length := bytes.Replace(bufBytes,
@@ -515,39 +613,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongDataPush1Length.SetTree(wire.TxTreeStake)
 	ssgenWrongDataPush1Length.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongDataPush1Length.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadVotePush {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadVotePush, test, err)
+	err = CheckSSGen(ssgenWrongDataPush1Length.MsgTx())
+	if !errors.Is(err, ErrSSGenBadVotePush) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadVotePush, err)
 	}
-
-	// ---------------------------------------------------------------------------
-	// Test for longer OP_RETURN push being given in the 1st tx out
-	testDataPush1Length = bytes.Replace(bufBytes,
-		[]byte{
-			0x04, 0x6a, 0x02, 0x94, 0x8c,
-		},
-		[]byte{
-			0x06, 0x6a, 0x04, 0x94, 0x8c, 0x8c, 0x8c,
-		},
-		1)
-
-	// Deserialize the manipulated tx
-	rbuf = bytes.NewReader(testDataPush1Length)
-	err = tx.Deserialize(rbuf)
-	if err != nil {
-		t.Errorf("Deserialize error %v", err)
-	}
-
-	var ssgenLongDataPush1Length = dcrutil.NewTx(&tx)
-	ssgenLongDataPush1Length.SetTree(wire.TxTreeStake)
-	ssgenLongDataPush1Length.SetIndex(0)
-
-	test, err = stake.IsSSGen(ssgenLongDataPush1Length.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadVotePush, test, err)
+	if IsSSGen(ssgenWrongDataPush1Length.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -557,7 +629,7 @@ func TestIsSSGenErrors(t *testing.T) {
 		[]byte{
 			0x04, 0x6a, 0x02, 0x94, 0x8c,
 		},
-		[]byte{ // This uses an OP_PUSHDATA_1 2-byte push to do the push in 5 bytes
+		[]byte{ // This uses an OP_PUSHDATA1 2-byte push to do the push in 5 bytes
 			0x05, 0x6a, 0x4c, 0x02, 0x00, 0x00,
 		},
 		1)
@@ -573,11 +645,13 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgenWrongNullData1Prefix.SetTree(wire.TxTreeStake)
 	ssgenWrongNullData1Prefix.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgenWrongNullData1Prefix.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadVotePush {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadVotePush, test, err)
+	err = CheckSSGen(ssgenWrongNullData1Prefix.MsgTx())
+	if !errors.Is(err, ErrSSGenBadVotePush) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadVotePush, err)
+	}
+	if IsSSGen(ssgenWrongNullData1Prefix.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
 	}
 
 	// ---------------------------------------------------------------------------
@@ -603,136 +677,353 @@ func TestIsSSGenErrors(t *testing.T) {
 	ssgentestGenOutputUntagged.SetTree(wire.TxTreeStake)
 	ssgentestGenOutputUntagged.SetIndex(0)
 
-	test, err = stake.IsSSGen(ssgentestGenOutputUntagged.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSGenBadGenOuts {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenBadGenOuts, test, err)
+	err = CheckSSGen(ssgentestGenOutputUntagged.MsgTx())
+	if !errors.Is(err, ErrSSGenBadGenOuts) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadGenOuts, err)
+	}
+	if IsSSGen(ssgentestGenOutputUntagged.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// ---------------------------------------------------------------------------
+	// Treasury enabled
+
+	// Verify optional OP_RETURN with no discriminator.
+	var ssgenNoDiscriminator = dcrutil.NewTx(ssgenMsgTxNoDiscriminator)
+	ssgenNoDiscriminator.SetVersion(wire.TxVersionTreasury)
+	ssgenNoDiscriminator.SetTree(wire.TxTreeStake)
+	ssgenNoDiscriminator.SetIndex(0)
+
+	err = CheckSSGen(ssgenNoDiscriminator.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidDiscriminatorLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidDiscriminatorLength, err)
+	}
+	if IsSSGen(ssgenNoDiscriminator.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with an invalid discriminator length.
+	var ssgenInvalidDiscriminator = dcrutil.NewTx(ssgenMsgTxInvalidDiscriminator)
+	ssgenInvalidDiscriminator.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidDiscriminator.SetTree(wire.TxTreeStake)
+	ssgenInvalidDiscriminator.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidDiscriminator.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidDiscriminatorLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidDiscriminatorLength, err)
+	}
+	if IsSSGen(ssgenInvalidDiscriminator.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with an unknown discriminator.
+	var ssgenInvalidDiscriminator2 = dcrutil.NewTx(ssgenMsgTxUnknownDiscriminator)
+	ssgenInvalidDiscriminator2.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidDiscriminator2.SetTree(wire.TxTreeStake)
+	ssgenInvalidDiscriminator2.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidDiscriminator2.MsgTx())
+	if !errors.Is(err, ErrSSGenUnknownDiscriminator) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenUnknownDiscriminator, err)
+	}
+	if IsSSGen(ssgenInvalidDiscriminator2.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with an invalid OP_PUSHDATA1.
+	var ssgenInvalidDiscriminator3 = dcrutil.NewTx(ssgenMsgTxUnknownDiscriminator2)
+	ssgenInvalidDiscriminator3.SetTree(wire.TxTreeStake)
+	ssgenInvalidDiscriminator3.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidDiscriminator3.MsgTx())
+	if !errors.Is(err, ErrSSGenBadGenOuts) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenBadGenOuts, err)
+	}
+	if IsSSGen(ssgenInvalidDiscriminator3.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+	// Verify we don't crash in this case as well.
+	_, err = GetSSGenTreasuryVotes(ssgenInvalidDiscriminator3.MsgTx().TxOut[4].PkScript)
+	if !errors.Is(err, ErrSSGenInvalidNullScript) {
+		t.Error(err)
+	}
+
+	// Verify optional OP_RETURN with a valid discriminator but no vote.
+	var ssgenInvalidTVNoVote = dcrutil.NewTx(ssgenMsgTxInvalidTV)
+	ssgenInvalidTVNoVote.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVNoVote.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVNoVote.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVNoVote.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTVLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTVLength, err)
+	}
+	if IsSSGen(ssgenInvalidTVNoVote.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with a valid discriminator but a short vote.
+	var ssgenInvalidTVNoVote2 = dcrutil.NewTx(ssgenMsgTxInvalidTV2)
+	ssgenInvalidTVNoVote2.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVNoVote2.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVNoVote2.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVNoVote2.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTVLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTVLength, err)
+	}
+	if IsSSGen(ssgenInvalidTVNoVote2.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with a valid discriminator one valid vote
+	// and a short vote.
+	var ssgenInvalidTVNoVote3 = dcrutil.NewTx(ssgenMsgTxInvalidTV3)
+	ssgenInvalidTVNoVote3.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVNoVote3.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVNoVote3.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVNoVote3.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTVLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTVLength, err)
+	}
+	if IsSSGen(ssgenInvalidTVNoVote3.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with a valid discriminator 7 valid votes
+	// and a short vote.
+	var ssgenInvalidTVNoVote4 = dcrutil.NewTx(ssgenMsgTxInvalidTV4)
+	ssgenInvalidTVNoVote4.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVNoVote4.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVNoVote4.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVNoVote4.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTVLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTVLength, err)
+	}
+	if IsSSGen(ssgenInvalidTVNoVote4.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify optional OP_RETURN with a valid discriminator 7 valid votes
+	// but with an invalid OP_PUSHDATAX encoding..
+	var ssgenInvalidTVNoVote5 = dcrutil.NewTx(ssgenMsgTxInvalidTV5)
+	ssgenInvalidTVNoVote5.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVNoVote5.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVNoVote5.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVNoVote5.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidDiscriminatorLength) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidDiscriminatorLength, err)
+	}
+	if IsSSGen(ssgenInvalidTVNoVote5.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify invalid treasury vote bits (too many bits).
+	var ssgenInvalidTVote = dcrutil.NewTx(ssgenMsgTxInvalidTVote)
+	ssgenInvalidTVote.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVote.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVote.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVote.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTreasuryVote) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTreasuryVote, err)
+	}
+	if IsSSGen(ssgenInvalidTVote.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify invalid treasury vote bits (no bits).
+	var ssgenInvalidTVote2 = dcrutil.NewTx(ssgenMsgTxInvalidTVote2)
+	ssgenInvalidTVote2.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVote2.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVote2.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVote2.MsgTx())
+	if !errors.Is(err, ErrSSGenInvalidTreasuryVote) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenInvalidTreasuryVote, err)
+	}
+	if IsSSGen(ssgenInvalidTVote2.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+
+	// Verify duplicate tspend hash.
+	var ssgenInvalidTVote3 = dcrutil.NewTx(ssgenMsgTxInvalidTVote3)
+	ssgenInvalidTVote3.SetVersion(wire.TxVersionTreasury)
+	ssgenInvalidTVote3.SetTree(wire.TxTreeStake)
+	ssgenInvalidTVote3.SetIndex(0)
+
+	err = CheckSSGen(ssgenInvalidTVote3.MsgTx())
+	if !errors.Is(err, ErrSSGenDuplicateTreasuryVote) {
+		t.Errorf("CheckSSGen should have returned %v but instead returned %v",
+			ErrSSGenDuplicateTreasuryVote, err)
+	}
+	if IsSSGen(ssgenInvalidTVote3.MsgTx()) {
+		t.Errorf("IsSSGen claimed an invalid ssgen is valid")
+	}
+}
+
+// TestSSGenTreasuryVotes verifies that valid treasury votes return hashes.
+func TestSSGenTreasuryVotes(t *testing.T) {
+	var ssgenValidVote = dcrutil.NewTx(ssgenMsgTxValid)
+	ssgenValidVote.SetVersion(wire.TxVersionTreasury)
+	ssgenValidVote.SetTree(wire.TxTreeStake)
+	ssgenValidVote.SetIndex(0)
+
+	// Check null data
+	lastTxOut := ssgenMsgTxValid.TxOut[len(ssgenMsgTxValid.TxOut)-1]
+	if !IsNullDataScript(lastTxOut.Version, lastTxOut.PkScript) {
+		t.Fatal("Expected null data script for final output")
+	}
+
+	// Make sure ssgen is valid.
+	if !IsSSGen(ssgenValidVote.MsgTx()) {
+		t.Error("IsSSGen claimed a valid ssgen is invalid")
+	}
+	err := CheckSSGen(ssgenValidVote.MsgTx())
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Pull out votes:
+	votes, err := GetSSGenTreasuryVotes(lastTxOut.PkScript)
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Verify hash equality.
+	expectedHash, err := chainhash.NewHash([]byte{
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range votes {
+		expectedHash[0] = byte(k) // Make each hash unique.
+		if !expectedHash.IsEqual(&v.Hash) {
+			t.Errorf("hash %v not equal. Got %v, wanted %v", k,
+				v, expectedHash)
+		}
 	}
 }
 
 // SSRTX TESTING ------------------------------------------------------------------
 
-func TestIsSSRtx(t *testing.T) {
-	var ssrtx = dcrutil.NewTx(ssrtxMsgTx)
-	ssrtx.SetTree(wire.TxTreeStake)
-	ssrtx.SetIndex(0)
+// TestCheckSSRtx validates that checking a revocation transaction works as
+// expected under a variety of conditions.
+func TestCheckSSRtx(t *testing.T) {
+	t.Parallel()
 
-	test, err := stake.IsSSRtx(ssrtx.MsgTx())
-	if !test || err != nil {
-		t.Errorf("IsSSRtx should have returned true,<nil> but instead returned %v"+
-			",%v", test, err)
-	}
-}
+	tests := []struct {
+		name    string
+		tx      *wire.MsgTx
+		wantErr error
+	}{{
+		name: "ok",
+		tx:   ssrtxMsgTx,
+	}, {
+		name: "ok (auto revocations enabled)",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.Version = TxVersionAutoRevocations
+			tx.TxIn[0].SignatureScript = nil
+			return tx
+		}(),
+	}, {
+		name:    "too many inputs",
+		tx:      ssrtxMsgTxTooManyInputs,
+		wantErr: ErrSSRtxWrongNumInputs,
+	}, {
+		name:    "too many outputs",
+		tx:      ssrtxMsgTxTooManyOutputs,
+		wantErr: ErrSSRtxTooManyOutputs,
+	}, {
+		name: "no outputs",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.TxOut = nil
+			return tx
+		}(),
+		wantErr: ErrSSRtxNoOutputs,
+	}, {
+		name:    "invalid script version",
+		tx:      ssrtxMsgTxBadVerOut,
+		wantErr: ErrSSRtxBadOuts,
+	}, {
+		name: "input from incorrect tree",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.TxIn[0].PreviousOutPoint.Tree = wire.TxTreeRegular
+			return tx
+		}(),
+		wantErr: ErrSSRtxWrongTxTree,
+	}, {
+		name: "output not OP_SSRTX tagged",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.TxOut[0].PkScript[0] = txscript.OP_SSGEN
+			return tx
+		}(),
+		wantErr: ErrSSRtxBadOuts,
+	}, {
+		name: "input contains a non-empty signature script (auto revocations " +
+			"enabled)",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.Version = TxVersionAutoRevocations
+			return tx
+		}(),
+		wantErr: ErrSSRtxInputHasSigScript,
+	}, {
+		name: "non-zero fee (auto revocations enabled)",
+		tx: func() *wire.MsgTx {
+			tx := ssrtxMsgTx.Copy()
+			tx.Version = TxVersionAutoRevocations
+			tx.TxIn[0].SignatureScript = nil
+			outputAmt := int64(0)
+			for _, txOut := range tx.TxOut {
+				outputAmt += txOut.Value
+			}
+			tx.TxIn[0].ValueIn = outputAmt + 1
+			return tx
+		}(),
+		wantErr: ErrSSRtxInvalidFee,
+	}}
 
-func TestIsSSRtxErrors(t *testing.T) {
-	// Initialize the buffer for later manipulation
-	var buf bytes.Buffer
-	buf.Grow(ssrtxMsgTx.SerializeSize())
-	err := ssrtxMsgTx.Serialize(&buf)
-	if err != nil {
-		t.Errorf("Error serializing the reference sstx: %v", err)
-	}
-	bufBytes := buf.Bytes()
+	for _, test := range tests {
+		// Check if the test transaction is a revocation.
+		err := CheckSSRtx(test.tx)
 
-	// ---------------------------------------------------------------------------
-	// Test too many inputs with ssrtxMsgTxTooManyInputs
+		// Validate that the expected error was returned for negative tests.
+		if test.wantErr != nil {
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("%q: mismatched error -- got %T, want %T", test.name, err,
+					test.wantErr)
+			}
+			continue
+		}
 
-	var ssrtxTooManyInputs = dcrutil.NewTx(ssrtxMsgTxTooManyInputs)
-	ssrtxTooManyInputs.SetTree(wire.TxTreeStake)
-	ssrtxTooManyInputs.SetIndex(0)
-
-	test, err := stake.IsSSRtx(ssrtxTooManyInputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSRtxWrongNumInputs {
-		t.Errorf("IsSSRtx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSRtxWrongNumInputs, test, err)
-	}
-
-	// ---------------------------------------------------------------------------
-	// Test too many outputs with ssrtxMsgTxTooManyOutputs
-
-	var ssrtxTooManyOutputs = dcrutil.NewTx(ssrtxMsgTxTooManyOutputs)
-	ssrtxTooManyOutputs.SetTree(wire.TxTreeStake)
-	ssrtxTooManyOutputs.SetIndex(0)
-
-	test, err = stake.IsSSRtx(ssrtxTooManyOutputs.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSRtxTooManyOutputs {
-		t.Errorf("IsSSRtx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSRtxTooManyOutputs, test, err)
-	}
-
-	// ---------------------------------------------------------------------------
-	// Test for bad version of output.
-	var ssrtxTxBadVerOut = dcrutil.NewTx(ssrtxMsgTxBadVerOut)
-	ssrtxTxBadVerOut.SetTree(wire.TxTreeStake)
-	ssrtxTxBadVerOut.SetIndex(0)
-
-	test, err = stake.IsSSRtx(ssrtxTxBadVerOut.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSRtxBadOuts {
-		t.Errorf("IsSSRtx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSRtxBadOuts, test, err)
-	}
-
-	// ---------------------------------------------------------------------------
-	// Test for an index 0+ output being not OP_SSRTX tagged
-	testRevocOutputUntagged := bytes.Replace(bufBytes,
-		[]byte{
-			0x1a, 0xbc, 0x76, 0xa9, 0x14, 0xc3, 0x98,
-		},
-		[]byte{
-			0x19, 0x76, 0xa9, 0x14, 0xc3, 0x98,
-		},
-		1)
-
-	// Deserialize the manipulated tx
-	var tx wire.MsgTx
-	rbuf := bytes.NewReader(testRevocOutputUntagged)
-	err = tx.Deserialize(rbuf)
-	if err != nil {
-		t.Errorf("Deserialize error %v", err)
-	}
-
-	var ssrtxTestRevocOutputUntagged = dcrutil.NewTx(&tx)
-	ssrtxTestRevocOutputUntagged.SetTree(wire.TxTreeStake)
-	ssrtxTestRevocOutputUntagged.SetIndex(0)
-
-	test, err = stake.IsSSRtx(ssrtxTestRevocOutputUntagged.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSRtxBadOuts {
-		t.Errorf("IsSSGen should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSRtxBadOuts, test, err)
-	}
-
-	// ---------------------------------------------------------------------------
-	// Wrong tree for inputs test
-
-	// Replace TxTreeStake with TxTreeRegular
-	testWrongTreeInputs := bytes.Replace(bufBytes,
-		[]byte{0x79, 0xac, 0x88, 0xfd, 0xf3, 0x57, 0xa1, 0x87, 0x00,
-			0x00, 0x00, 0x00, 0x01},
-		[]byte{0x79, 0xac, 0x88, 0xfd, 0xf3, 0x57, 0xa1, 0x87, 0x00,
-			0x00, 0x00, 0x00, 0x00},
-		1)
-
-	// Deserialize the manipulated tx
-	rbuf = bytes.NewReader(testWrongTreeInputs)
-	err = tx.Deserialize(rbuf)
-	if err != nil {
-		t.Errorf("Deserialize error %v", err)
-	}
-
-	var ssrtxWrongTreeIns = dcrutil.NewTx(&tx)
-	ssrtxWrongTreeIns.SetTree(wire.TxTreeStake)
-	ssrtxWrongTreeIns.SetIndex(0)
-
-	test, err = stake.IsSSRtx(ssrtxWrongTreeIns.MsgTx())
-	if test || err.(stake.RuleError).GetCode() !=
-		stake.ErrSSRtxWrongTxTree {
-		t.Errorf("IsSSRtx should have returned false,%v but instead returned %v"+
-			",%v", stake.ErrSSGenWrongTxTree, test, err)
+		// Validate that an unexpected error was not returned.
+		if err != nil {
+			t.Fatalf("%q: unexpected error checking transaction: %v", test.name, err)
+		}
 	}
 }
 
@@ -743,7 +1034,7 @@ func TestGetSSGenBlockVotedOn(t *testing.T) {
 	ssgen.SetTree(wire.TxTreeStake)
 	ssgen.SetIndex(0)
 
-	blockHash, height, err := stake.SSGenBlockVotedOn(ssgen.MsgTx())
+	blockHash, height := SSGenBlockVotedOn(ssgen.MsgTx())
 
 	correctBlockHash, _ := chainhash.NewHash(
 		[]byte{
@@ -759,18 +1050,14 @@ func TestGetSSGenBlockVotedOn(t *testing.T) {
 
 	correctheight := uint32(0x2123e300)
 
-	if err != nil {
-		t.Errorf("Error thrown on TestGetSSGenBlockVotedOn: %v", err)
-	}
-
 	if !reflect.DeepEqual(blockHash, *correctBlockHash) {
 		t.Errorf("Error thrown on TestGetSSGenBlockVotedOn: Looking for "+
-			"hash %v, got hash %v: %v", *correctBlockHash, blockHash, err)
+			"hash %v, got hash %v", *correctBlockHash, blockHash)
 	}
 
 	if height != correctheight {
 		t.Errorf("Error thrown on TestGetSSGenBlockVotedOn: Looking for "+
-			"height %v, got height %v: %v", correctheight, height, err)
+			"height %v, got height %v", correctheight, height)
 	}
 }
 
@@ -797,7 +1084,7 @@ func TestGetSStxStakeOutputInfo(t *testing.T) {
 	correctLimit := uint16(4)
 
 	typs, pkhs, amts, changeAmts, rules, limits :=
-		stake.TxSStxStakeOutputInfo(sstx.MsgTx())
+		TxSStxStakeOutputInfo(sstx.MsgTx())
 
 	if typs[2] != correctTyp {
 		t.Errorf("Error thrown on TestGetSStxStakeOutputInfo: Looking for "+
@@ -830,44 +1117,6 @@ func TestGetSStxStakeOutputInfo(t *testing.T) {
 	}
 }
 
-func TestGetSSGenStakeOutputInfo(t *testing.T) {
-	var ssgen = dcrutil.NewTx(ssgenMsgTx)
-	ssgen.SetTree(wire.TxTreeStake)
-	ssgen.SetIndex(0)
-
-	correctTyp := false
-
-	correctpkh := []byte{0xc3, 0x98, 0xef, 0xa9,
-		0xc3, 0x92, 0xba, 0x60,
-		0x13, 0xc5, 0xe0, 0x4e,
-		0xe7, 0x29, 0x75, 0x5e,
-		0xf7, 0xf5, 0x8b, 0x32,
-	}
-
-	correctamt := int64(0x2123e300)
-
-	typs, pkhs, amts, err := stake.TxSSGenStakeOutputInfo(ssgen.MsgTx(),
-		&chaincfg.SimNetParams)
-	if err != nil {
-		t.Errorf("Got unexpected error: %v", err.Error())
-	}
-
-	if typs[0] != correctTyp {
-		t.Errorf("Error thrown on TestGetSSGenStakeOutputInfo: Looking for "+
-			"type %v, got type %v", correctamt, amts[0])
-	}
-
-	if !reflect.DeepEqual(pkhs[0], correctpkh) {
-		t.Errorf("Error thrown on TestGetSSGenStakeOutputInfo: Looking for "+
-			"pkh %v, got pkh %v", correctpkh, pkhs[0])
-	}
-
-	if amts[0] != correctamt {
-		t.Errorf("Error thrown on TestGetSSGenStakeOutputInfo: Looking for "+
-			"amount %v, got amount %v", correctamt, amts[0])
-	}
-}
-
 func TestGetSSGenVoteBits(t *testing.T) {
 	var ssgen = dcrutil.NewTx(ssgenMsgTx)
 	ssgen.SetTree(wire.TxTreeStake)
@@ -875,7 +1124,7 @@ func TestGetSSGenVoteBits(t *testing.T) {
 
 	correctvbs := uint16(0x8c94)
 
-	votebits := stake.SSGenVoteBits(ssgen.MsgTx())
+	votebits := SSGenVoteBits(ssgen.MsgTx())
 
 	if correctvbs != votebits {
 		t.Errorf("Error thrown on TestGetSSGenVoteBits: Looking for "+
@@ -886,116 +1135,82 @@ func TestGetSSGenVoteBits(t *testing.T) {
 func TestGetSSGenVersion(t *testing.T) {
 	var ssgen = ssgenMsgTx.Copy()
 
-	missingVersion := uint32(stake.VoteConsensusVersionAbsent)
-	version := stake.SSGenVersion(ssgen)
+	missingVersion := uint32(VoteConsensusVersionAbsent)
+	version := SSGenVersion(ssgen)
 	if version != missingVersion {
-		t.Errorf("Error thrown on TestGetSSGenVersion: Looking for "+
+		t.Fatalf("Error thrown on TestGetSSGenVersion: Looking for "+
 			"version % x, got version % x", missingVersion, version)
 	}
 
 	vbBytes := []byte{0x01, 0x00, 0x01, 0xef, 0xcd, 0xab}
 	expectedVersion := uint32(0xabcdef01)
-	pkScript, err := txscript.GenerateProvablyPruneableOut(vbBytes)
+	builder := txscript.NewScriptBuilder()
+	pkScript, err := builder.AddOp(txscript.OP_RETURN).AddData(vbBytes).Script()
 	if err != nil {
-		t.Errorf("GenerateProvablyPruneableOut error %v", err)
+		t.Fatalf("error generating vote bits: %v", err)
 	}
 	ssgen.TxOut[1].PkScript = pkScript
-	version = stake.SSGenVersion(ssgen)
+	version = SSGenVersion(ssgen)
 
 	if version != expectedVersion {
-		t.Errorf("Error thrown on TestGetSSGenVersion: Looking for "+
+		t.Fatalf("Error thrown on TestGetSSGenVersion: Looking for "+
 			"version % x, got version % x", expectedVersion, version)
 	}
 }
 
-func TestGetSSRtxStakeOutputInfo(t *testing.T) {
-	var ssrtx = dcrutil.NewTx(ssrtxMsgTx)
-	ssrtx.SetTree(wire.TxTreeStake)
-	ssrtx.SetIndex(0)
-
-	correctTyp := false
-
-	correctPkh := []byte{0xc3, 0x98, 0xef, 0xa9,
-		0xc3, 0x92, 0xba, 0x60,
-		0x13, 0xc5, 0xe0, 0x4e,
-		0xe7, 0x29, 0x75, 0x5e,
-		0xf7, 0xf5, 0x8b, 0x33,
-	}
-
-	correctAmt := int64(0x2122e300)
-
-	typs, pkhs, amts, err := stake.TxSSRtxStakeOutputInfo(ssrtx.MsgTx(),
-		&chaincfg.SimNetParams)
-	if err != nil {
-		t.Errorf("Got unexpected error: %v", err.Error())
-	}
-
-	if typs[0] != correctTyp {
-		t.Errorf("Error thrown on TestGetSStxStakeOutputInfo: Looking for "+
-			"type %v, got type %v", correctTyp, typs[0])
-	}
-
-	if !reflect.DeepEqual(pkhs[0], correctPkh) {
-		t.Errorf("Error thrown on TestGetSStxStakeOutputInfo: Looking for "+
-			"pkh %v, got pkh %v", correctPkh, pkhs[0])
-	}
-
-	if amts[0] != correctAmt {
-		t.Errorf("Error thrown on TestGetSStxStakeOutputInfo: Looking for "+
-			"amount %v, got amount %v", correctAmt, amts[0])
-	}
-}
-
 func TestGetSStxNullOutputAmounts(t *testing.T) {
-	commitAmts := []int64{int64(0x2122e300),
-		int64(0x12000000),
-		int64(0x12300000)}
-	changeAmts := []int64{int64(0x0122e300),
-		int64(0x02000000),
-		int64(0x02300000)}
+	commitAmts := []int64{
+		0x2122e300,
+		0x12000000,
+		0x12300000,
+	}
+	changeAmts := []int64{
+		0x0122e300,
+		0x02000000,
+		0x02300000,
+	}
 	amtTicket := int64(0x9122e300)
 
-	_, _, err := stake.SStxNullOutputAmounts(
+	_, _, err := SStxNullOutputAmounts(
 		[]int64{
-			int64(0x12000000),
-			int64(0x12300000),
+			0x12000000,
+			0x12300000,
 		},
 		changeAmts,
 		amtTicket)
 
 	// len commit to amts != len change amts
-	lenErrStr := "amounts was not equal in length " +
-		"to change amounts!"
+	const lenErrStr = "amounts was not equal in length to change amounts!"
 	if err == nil || err.Error() != lenErrStr {
 		t.Errorf("TestGetSStxNullOutputAmounts unexpected error: %v", err)
 	}
 
 	// too small amount to commit
-	_, _, err = stake.SStxNullOutputAmounts(
+	_, _, err = SStxNullOutputAmounts(
 		commitAmts,
 		changeAmts,
 		int64(0x00000000))
-	tooSmallErrStr := "committed amount was too small!"
+	const tooSmallErrStr = "committed amount was too small!"
 	if err == nil || err.Error() != tooSmallErrStr {
 		t.Errorf("TestGetSStxNullOutputAmounts unexpected error: %v", err)
 	}
 
 	// overspending error
-	tooMuchChangeAmts := []int64{int64(0x0122e300),
-		int64(0x02000000),
-		int64(0x12300001)}
+	tooMuchChangeAmts := []int64{
+		0x0122e300,
+		0x02000000,
+		0x12300001,
+	}
 
-	_, _, err = stake.SStxNullOutputAmounts(
+	_, _, err = SStxNullOutputAmounts(
 		commitAmts,
 		tooMuchChangeAmts,
 		int64(0x00000020))
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrSStxBadChangeAmts {
+	if !errors.Is(err, ErrSStxBadChangeAmts) {
 		t.Errorf("TestGetSStxNullOutputAmounts unexpected error: %v", err)
 	}
 
-	fees, amts, err := stake.SStxNullOutputAmounts(commitAmts,
-		changeAmts,
+	fees, amts, err := SStxNullOutputAmounts(commitAmts, changeAmts,
 		amtTicket)
 
 	if err != nil {
@@ -1009,9 +1224,10 @@ func TestGetSStxNullOutputAmounts(t *testing.T) {
 			"but got %v", expectedFees, fees)
 	}
 
-	expectedAmts := []int64{int64(0x20000000),
-		int64(0x10000000),
-		int64(0x10000000),
+	expectedAmts := []int64{
+		0x20000000,
+		0x10000000,
+		0x10000000,
 	}
 
 	if !reflect.DeepEqual(expectedAmts, amts) {
@@ -1020,462 +1236,504 @@ func TestGetSStxNullOutputAmounts(t *testing.T) {
 	}
 }
 
-func TestGetStakeRewards(t *testing.T) {
-	// SSGen example with >0 subsidy
-	amounts := []int64{int64(21000000),
-		int64(11000000),
-		int64(10000000),
-	}
-	amountTicket := int64(42000000)
-	subsidy := int64(400000)
+// TestCalculateRewards ensures that ticket output amounts are calculated
+// correctly for votes under a variety of conditions.
+func TestCalculateRewards(t *testing.T) {
+	t.Parallel()
 
-	outAmts := stake.CalculateRewards(amounts, amountTicket, subsidy)
+	tests := []struct {
+		name                 string
+		contribAmounts       []int64
+		ticketPurchaseAmount int64
+		voteSubsidy          int64
+		want                 []int64
+	}{{
+		name: "vote rewards - evenly divisible over all outputs",
+		contribAmounts: []int64{
+			2500000000,
+			2500000000,
+			5000000000,
+			10000000000,
+		},
+		ticketPurchaseAmount: 20000000000,
+		voteSubsidy:          100000000,
+		want: []int64{
+			2512500000,
+			2512500000,
+			5025000000,
+			10050000000,
+		},
+	}, {
+		name: "vote rewards - remainder of 2",
+		contribAmounts: []int64{
+			100000000,
+			100000000,
+			100000000,
+		},
+		ticketPurchaseAmount: 300000000,
+		voteSubsidy:          300002,
+		want: []int64{
+			100100000,
+			100100000,
+			100100000,
+		},
+	}}
 
-	// SSRtx example with 0 subsidy
-	expectedAmts := []int64{int64(21200000),
-		int64(11104761),
-		int64(10095238),
-	}
-
-	if !reflect.DeepEqual(expectedAmts, outAmts) {
-		t.Errorf("TestGetStakeRewards error, wanted %v, "+
-			"but got %v", expectedAmts, outAmts)
+	for _, test := range tests {
+		got := CalculateRewards(test.contribAmounts, test.ticketPurchaseAmount,
+			test.voteSubsidy)
+		if !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%q: unexpected result -- got %v, want %v", test.name, got,
+				test.want)
+		}
 	}
 }
 
-func TestVerifySStxAmounts(t *testing.T) {
-	amounts := []int64{int64(21000000),
-		int64(11000000),
-		int64(10000000),
-	}
-	calcAmounts := []int64{int64(21000000),
-		int64(11000000),
-		int64(10000000),
-	}
+// TestCalculateRevocationRewards ensures that ticket output amounts are
+// calculated correctly for revocations under a variety of conditions.
+func TestCalculateRevocationRewards(t *testing.T) {
+	t.Parallel()
 
-	// len error for slices
-	calcAmountsBad := []int64{int64(11000000),
-		int64(10000000),
-	}
-	err := stake.VerifySStxAmounts(amounts,
-		calcAmountsBad)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerSStxAmts {
-		t.Errorf("TestVerifySStxAmounts unexpected error: %v", err)
-	}
+	// Default header bytes for tests.
+	prevHeaderBytes := hexToBytes("07000000dc02335daa073d293e1b150648f0444a60b9" +
+		"c97604abd01e00000000000000003c449b2321c4bd0d1fa76ed59f80ebaf46f16cfb2d17" +
+		"ba46948f09f21861095566482410a463ed49473c27278cd7a2a3712a3b19ff1f6225717d" +
+		"3eb71cc2b5590100012c7312a3c30500050095a100000cf42418f1820a870300000020a1" +
+		"0700091600005b32a55f5bcce31078832100007469943958002e00000000000000000000" +
+		"0000000000000000000007000000")
 
-	// non-congruent slices error
-	calcAmountsBad = []int64{int64(21000000),
-		int64(11000000),
-		int64(10000001),
-	}
-	err = stake.VerifySStxAmounts(amounts,
-		calcAmountsBad)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerSStxAmts {
-		t.Errorf("TestVerifySStxAmounts unexpected error: %v", err)
-	}
+	tests := []struct {
+		name                     string
+		contribAmounts           []int64
+		ticketPurchaseAmount     int64
+		prevHeaderBytes          []byte
+		isAutoRevocationsEnabled bool
+		want                     []int64
+	}{{
+		name: "revocation rewards - evenly divisible over all outputs (auto " +
+			"revocations disabled)",
+		contribAmounts: []int64{
+			2500000000,
+			2500000000,
+			5000000000,
+			10000000000,
+		},
+		ticketPurchaseAmount: 20000000000,
+		want: []int64{
+			2500000000,
+			2500000000,
+			5000000000,
+			10000000000,
+		},
+	}, {
+		name: "revocation rewards - remainder of 4 (auto revocations disabled)",
+		contribAmounts: []int64{
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+		},
+		ticketPurchaseAmount: 799999996,
+		want: []int64{
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+		},
+	}, {
+		name: "revocation rewards - evenly divisible over all outputs (auto " +
+			"revocations enabled)",
+		contribAmounts: []int64{
+			2500000000,
+			2500000000,
+			5000000000,
+			10000000000,
+		},
+		ticketPurchaseAmount:     20000000000,
+		prevHeaderBytes:          prevHeaderBytes,
+		isAutoRevocationsEnabled: true,
+		want: []int64{
+			2500000000,
+			2500000000,
+			5000000000,
+			10000000000,
+		},
+	}, {
+		name: "revocation rewards - remainder of 4 (auto revocations enabled)",
+		contribAmounts: []int64{
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+			100000000,
+		},
+		ticketPurchaseAmount:     799999996,
+		prevHeaderBytes:          prevHeaderBytes,
+		isAutoRevocationsEnabled: true,
+		want: []int64{
+			99999999,
+			100000000,
+			99999999,
+			99999999,
+			99999999,
+			99999999,
+			100000001,
+			100000000,
+		},
+	}}
 
-	err = stake.VerifySStxAmounts(amounts,
-		calcAmounts)
-	if err != nil {
-		t.Errorf("TestVerifySStxAmounts unexpected error: %v", err)
+	for _, test := range tests {
+		got := CalculateRevocationRewards(test.contribAmounts,
+			test.ticketPurchaseAmount, test.prevHeaderBytes,
+			test.isAutoRevocationsEnabled)
+		if !reflect.DeepEqual(got, test.want) {
+			t.Errorf("%q: unexpected result -- got %v, want %v", test.name, got,
+				test.want)
+		}
 	}
 }
 
-func TestVerifyStakingPkhsAndAmounts(t *testing.T) {
-	types := []bool{false, false}
-	amounts := []int64{int64(21000000),
-		int64(11000000),
-	}
-	pkhs := [][]byte{
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00},
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x04, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x03}}
-	spendTypes := []bool{false, false}
-	spendAmounts := []int64{int64(21000000),
-		int64(11000000),
-	}
-	spendPkhs := [][]byte{
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00},
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x04, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x03}}
-	spendRules := [][]bool{
-		{false, false},
-		{false, false}}
-	spendLimits := [][]uint16{
-		{16, 20},
-		{16, 20}}
+func TestIsNullDataScript(t *testing.T) {
+	var hash160 = stdaddr.Hash160([]byte("test"))
+	var overMaxDataCarrierSize = make([]byte, MaxDataCarrierSize+1)
+	var underMaxDataCarrierSize = make([]byte, MaxDataCarrierSize/2)
+	rand.Read(overMaxDataCarrierSize)
+	rand.Read(underMaxDataCarrierSize)
 
-	// bad types len
-	spendTypesBad := []bool{false}
-	err := stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypesBad,
-		spendPkhs,
-		spendAmounts,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyInput {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
+	tests := []struct {
+		name         string
+		scriptSource *txscript.ScriptBuilder
+		version      uint16
+		expected     bool
+	}{
+		{
+			name: "OP_RETURN script",
+			scriptSource: txscript.NewScriptBuilder().
+				AddOp(txscript.OP_RETURN),
+			version:  0,
+			expected: true,
+		},
+		{
+			name: "OP_RETURN script with unsupported version",
+			scriptSource: txscript.NewScriptBuilder().
+				AddOp(txscript.OP_RETURN),
+			version:  100,
+			expected: false,
+		},
+		{
+			name: "OP_RETURN script with data under MaxDataCarrierSize",
+			scriptSource: txscript.NewScriptBuilder().
+				AddOp(txscript.OP_RETURN).AddData(underMaxDataCarrierSize),
+			version:  0,
+			expected: true,
+		},
+		{
+			name: "OP_RETURN script with data over MaxDataCarrierSize",
+			scriptSource: txscript.NewScriptBuilder().
+				AddOp(txscript.OP_RETURN).AddData(overMaxDataCarrierSize),
+			version:  0,
+			expected: false,
+		},
+		{
+			name: "revocation-tagged p2pkh script",
+			scriptSource: txscript.NewScriptBuilder().
+				AddOp(txscript.OP_SSRTX).AddOp(txscript.OP_DUP).
+				AddOp(txscript.OP_HASH160).AddData(hash160).
+				AddOp(txscript.OP_EQUALVERIFY).AddOp(txscript.OP_CHECKSIG),
+			version:  0,
+			expected: false,
+		},
 	}
 
-	// bad types
-	spendTypesBad = []bool{false, true}
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypesBad,
-		spendPkhs,
-		spendAmounts,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyOutType {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
+	for _, test := range tests {
+		script, err := test.scriptSource.Script()
+		if err != nil {
+			t.Fatalf("%s: unexpected script generation error: %s",
+				test.name, err)
+		}
 
-	// len error for amt slices
-	spendAmountsBad := []int64{int64(11000111)}
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypes,
-		spendPkhs,
-		spendAmountsBad,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyInput {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// len error for pks slices
-	spendPkhsBad := [][]byte{
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00},
-	}
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypes,
-		spendPkhsBad,
-		spendAmounts,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyInput {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// amount non-equivalence in position 1
-	spendAmountsNonequiv := []int64{int64(21000000),
-		int64(11000000)}
-	spendAmountsNonequiv[1]--
-
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypes,
-		spendPkhs,
-		spendAmountsNonequiv,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyOutputAmt {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// pkh non-equivalence in position 1
-	spendPkhsNonequiv := [][]byte{
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00},
-		{0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x04, 0x00,
-			0x00, 0x01, 0x02, 0x00,
-			0x00, 0x01, 0x02, 0x04}}
-
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypes,
-		spendPkhsNonequiv,
-		spendAmounts,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyOutPkhs {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// rule non-equivalence in position 1
-	spendRulesNonequivV := [][]bool{
-		{false, false},
-		{true, false}}
-	spendAmountsNonequivV := []int64{int64(21000000),
-		int64(10934463)}
-	spendAmountsNonequivVTooBig := []int64{int64(21000000),
-		int64(11000001)}
-
-	spendRulesNonequivR := [][]bool{
-		{false, false},
-		{false, true}}
-	spendAmountsNonequivR := []int64{int64(21000000),
-		int64(9951423)}
-
-	// vote
-	// original amount: 11000000
-	// with the flag enabled, the minimum allowed to be spent is
-	// 11000000 - 1 << 16 = 10934464
-	// So, 10934464 should pass while 10934463 should fail.
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		spendAmountsNonequivV,
-		spendTypes,
-		spendPkhs,
-		amounts,
-		true, // Vote
-		spendRulesNonequivV,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyTooMuchFees {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// original amount: 11000000
-	// the maximum allows to be spent is 11000000
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		spendAmountsNonequivVTooBig,
-		spendTypes,
-		spendPkhs,
-		amounts,
-		true, // Vote
-		spendRulesNonequivV,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifySpendTooMuch {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// revocation
-	// original amount: 11000000
-	// with the flag enabled, the minimum allowed to be spent is
-	// 11000000 - 1 << 20 = 9951424
-	// So, 9951424 should pass while 9951423 should fail.
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		spendAmountsNonequivR,
-		spendTypes,
-		spendPkhs,
-		amounts,
-		false, // Revocation
-		spendRulesNonequivR,
-		spendLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyTooMuchFees {
-		t.Errorf("TestVerifyStakingPkhsAndAmounts unexpected error: %v", err)
-	}
-
-	// correct verification
-	err = stake.VerifyStakingPkhsAndAmounts(types,
-		pkhs,
-		amounts,
-		spendTypes,
-		spendPkhs,
-		spendAmounts,
-		true, // Vote
-		spendRules,
-		spendLimits)
-	if err != nil {
-		t.Errorf("TestVerifySStxAmounts unexpected error: %v", err)
+		result := IsNullDataScript(test.version, script)
+		if result != test.expected {
+			t.Fatalf("%s: expected %v, got %v", test.name,
+				test.expected, result)
+		}
 	}
 }
 
-func TestVerifyRealTxs(t *testing.T) {
-	// Load an SStx and the SSRtx that spends to test some real fee situation
-	// and confirm the functionality of the functions used.
-	hexSstx, _ := hex.DecodeString("010000000267cfaa9ce3a50977dcd1015f4f" +
-		"ce330071a3a9b855210e6646f6434caebda5a60200000001fffffffff6e6004" +
-		"fd4a0a8d5823c99be0a66a5f9a89c3dd4f7cbf76880098b8ca9d80b0e020000" +
-		"0001ffffffff05a42df60c0000000000001aba76a914c96206f8a3976057b2e" +
-		"b846d46d4a909972fc7c788ac00000000000000000000206a1ec96206f8a397" +
-		"6057b2eb846d46d4a909972fc7c780fe210a000000000054000000000000000" +
-		"000001abd76a914c96206f8a3976057b2eb846d46d4a909972fc7c788ac0000" +
-		"0000000000000000206a1ec96206f8a3976057b2eb846d46d4a909972fc7c70" +
-		"c33d40200000000005474cb4d070000000000001abd76a914c96206f8a39760" +
-		"57b2eb846d46d4a909972fc7c788ac00000000000000000280fe210a0000000" +
-		"013030000000000006a47304402200dbc873e69571a4516c4ef869d856386f9" +
-		"86c8543c0bc9f372ecd22c8606ccb102200f87a8f1b316b7675dfd1706eb22f" +
-		"331cea14d2e2d5f2c1d88173881a0cd4a04012102716f806d1156d20b9b2482" +
-		"2bff88549b510f400473536d3ea8d188b9fbe3835680fe210a0000000002030" +
-		"000040000006b483045022100bc7d0b7aa2c6610b7639f492fa556954ebc52a" +
-		"9dca5a417be4705ab424255ccd02200a0ccba2e2b7391b93b927f35150c1253" +
-		"2bdc6f27a8e9eb0bd0bfbc8b9ab13a5012102716f806d1156d20b9b24822bff" +
-		"88549b510f400473536d3ea8d188b9fbe38356")
-	sstxMtx := new(wire.MsgTx)
-	sstxMtx.FromBytes(hexSstx)
-	sstxTx := dcrutil.NewTx(sstxMtx)
-	sstxTypes, sstxAddrs, sstxAmts, _, sstxRules, sstxLimits :=
-		stake.TxSStxStakeOutputInfo(sstxTx.MsgTx())
+// TestCreateRevocationFromTicket validates that revocation transactions are
+// created correctly under a variety of conditions.
+func TestCreateRevocationFromTicket(t *testing.T) {
+	t.Parallel()
 
-	hexSsrtx, _ := hex.DecodeString("010000000147f4453f244f2589551aea7c714d" +
-		"771053b667c6612616e9c8fc0e68960a9a100000000001ffffffff0270d7210a00" +
-		"00000000001abc76a914c96206f8a3976057b2eb846d46d4a909972fc7c788ac0c" +
-		"33d4020000000000001abc76a914c96206f8a3976057b2eb846d46d4a909972fc7" +
-		"c788ac000000000000000001ffffffffffffffff00000000ffffffff6b48304502" +
-		"2100d01c52c3f0c27166e3633d93b5ba821365a73f761e23bb04cc8061a28ab1bd" +
-		"7d02202bd65a6d16aaefe8b7f56378d58da6650f2e4b20bd5cb659dc9e842ce2d9" +
-		"15e6012102716f806d1156d20b9b24822bff88549b510f400473536d3ea8d188b9" +
-		"fbe38356")
-	ssrtxMtx := new(wire.MsgTx)
-	ssrtxMtx.FromBytes(hexSsrtx)
-	ssrtxTx := dcrutil.NewTx(ssrtxMtx)
+	// Default network parameters to use for tests.
+	params := chaincfg.RegNetParams()
 
-	ssrtxTypes, ssrtxAddrs, ssrtxAmts, err :=
-		stake.TxSSRtxStakeOutputInfo(ssrtxTx.MsgTx(), &chaincfg.TestNet2Params)
-	if err != nil {
-		t.Errorf("Unexpected GetSSRtxStakeOutputInfo error: %v", err.Error())
+	// Default header bytes for tests.
+	prevHeaderBytes := hexToBytes("07000000dc02335daa073d293e1b150648f0444a60b9" +
+		"c97604abd01e00000000000000003c449b2321c4bd0d1fa76ed59f80ebaf46f16cfb2d17" +
+		"ba46948f09f21861095566482410a463ed49473c27278cd7a2a3712a3b19ff1f6225717d" +
+		"3eb71cc2b5590100012c7312a3c30500050095a100000cf42418f1820a870300000020a1" +
+		"0700091600005b32a55f5bcce31078832100007469943958002e00000000000000000000" +
+		"0000000000000000000007000000")
+
+	// The following variables are derived from a mainnet ticket that was
+	// purchased in block 135375 and revoked in block 140709.
+	ticketHash := mustParseHash("dad48ac8c59ee97d1a6fd04ad4f1c8392357a6ee78d39f" +
+		"fc00fb467a0cdba695")
+	ticketOut1 := &MinimalOutput{
+		PkScript: hexToBytes("ba76a914097e847d49c6806f6933e806a350f43b97ac70d088a" +
+			"c"),
+		Value:   4126629682,
+		Version: 0,
 	}
-
-	ssrtxCalcAmts := stake.CalculateRewards(sstxAmts, sstxMtx.TxOut[0].Value,
-		int64(0))
-
-	// Here an error is thrown because the second output spends too much.
-	// Ticket price: 217460132
-	// 1: 170000000 - 170000000. 169999218 allowed back (-782 atoms)
-	// 2: 170000000 -  47461132. 122538868 Change. Paid 1000 fees total.
-	//    47460913 allowed back (-219 atoms for fee).
-	// In this test the second output spends 47461132, which is more than
-	// allowed.
-	err = stake.VerifyStakingPkhsAndAmounts(sstxTypes,
-		sstxAddrs,
-		ssrtxAmts,
-		ssrtxTypes,
-		ssrtxAddrs,
-		ssrtxCalcAmts,
-		false, // Revocation
-		sstxRules,
-		sstxLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifySpendTooMuch {
-		t.Errorf("No or unexpected VerifyStakingPkhsAndAmounts error: %v",
-			err.Error())
+	ticketOut2 := &MinimalOutput{
+		PkScript: hexToBytes("6a1e86c6da62556f5e21fbce3564b7374724d65f0cbb51c66d0" +
+			"0000000800058"),
+		Value:   0,
+		Version: 0,
 	}
+	ticketOut3 := &MinimalOutput{
+		PkScript: hexToBytes("bd76a914000000000000000000000000000000000000000088a" +
+			"c"),
+		Value:   0,
+		Version: 0,
+	}
+	ticketOut4 := &MinimalOutput{
+		PkScript: hexToBytes("6a1e7e8efe653b374ba7ad950c873e483fc53c5bafa9c1c439f" +
+			"8000000000058"),
+		Value:   0,
+		Version: 0,
+	}
+	ticketOut5 := &MinimalOutput{
+		PkScript: hexToBytes("bd76a914000000000000000000000000000000000000000088a" +
+			"c"),
+		Value:   0,
+		Version: 0,
+	}
+	ticketMinOuts := []*MinimalOutput{
+		ticketOut1,
+		ticketOut2,
+		ticketOut3,
+		ticketOut4,
+		ticketOut5,
+	}
+	revocationHash := mustParseHash("46ae5f78174c6c6e3675d0bbfec27e25c40f3a119e" +
+		"df9183b96261db5cda7a4f")
+	revocationTxFee := dcrutil.Amount(285000)
+	revocationTxVersion := uint16(1)
 
-	// Correct this and make sure it passes.
-	ssrtxTx.MsgTx().TxOut[1].Value = 47460913
-	sstxTypes, sstxAddrs, sstxAmts, _, sstxRules, sstxLimits =
-		stake.TxSStxStakeOutputInfo(sstxTx.MsgTx())
-	ssrtxTypes, ssrtxAddrs, ssrtxAmts, err =
-		stake.TxSSRtxStakeOutputInfo(ssrtxTx.MsgTx(), &chaincfg.TestNet2Params)
-	if err != nil {
-		t.Errorf("Unexpected GetSSRtxStakeOutputInfo error: %v", err.Error())
-	}
-	ssrtxCalcAmts = stake.CalculateRewards(sstxAmts, sstxMtx.TxOut[0].Value,
-		int64(0))
-	err = stake.VerifyStakingPkhsAndAmounts(sstxTypes,
-		sstxAddrs,
-		ssrtxAmts,
-		ssrtxTypes,
-		ssrtxAddrs,
-		ssrtxCalcAmts,
-		false, // Revocation
-		sstxRules,
-		sstxLimits)
-	if err != nil {
-		t.Errorf("Unexpected VerifyStakingPkhsAndAmounts error: %v",
-			err)
-	}
+	// With auto revocations enabled.
+	autoRevocationsTxHash := mustParseHash("c8999b6e2544f339419cc5416f15e9b942c" +
+		"fd6481246012d2da82f4594310e65")
+	autoRevocationsTxFee := dcrutil.Amount(0)
+	autoRevocationsTxVersion := TxVersionAutoRevocations
 
-	// Spend too much fees for the limit in the first output and
-	// make sure it fails.
-	ssrtxTx.MsgTx().TxOut[0].Value = 0
-	sstxTypes, sstxAddrs, sstxAmts, _, sstxRules, sstxLimits =
-		stake.TxSStxStakeOutputInfo(sstxTx.MsgTx())
-	ssrtxTypes, ssrtxAddrs, ssrtxAmts, err =
-		stake.TxSSRtxStakeOutputInfo(ssrtxTx.MsgTx(), &chaincfg.TestNet2Params)
-	if err != nil {
-		t.Errorf("Unexpected GetSSRtxStakeOutputInfo error: %v", err.Error())
+	// Ticket commitment with a zero commitment amount.
+	ticketOutZeroCommitment := &MinimalOutput{
+		PkScript: hexToBytes("6a1e86c6da62556f5e21fbce3564b7374724d65f0cbb000" +
+			"00000000000000058"),
+		Value:   0,
+		Version: 0,
 	}
-	ssrtxCalcAmts = stake.CalculateRewards(sstxAmts, sstxMtx.TxOut[0].Value,
-		int64(0))
-	err = stake.VerifyStakingPkhsAndAmounts(sstxTypes,
-		sstxAddrs,
-		ssrtxAmts,
-		ssrtxTypes,
-		ssrtxAddrs,
-		ssrtxCalcAmts,
-		false, // Revocation
-		sstxRules,
-		sstxLimits)
-	if err == nil || err.(stake.RuleError).GetCode() !=
-		stake.ErrVerifyTooMuchFees {
-		t.Errorf("No or unexpected VerifyStakingPkhsAndAmounts error: %v",
-			err.Error())
+	ticketMinOutsZeroCommitment := []*MinimalOutput{
+		ticketOut1,
+		ticketOutZeroCommitment,
+		ticketOut3,
+		ticketOut4,
+		ticketOut5,
+	}
+	zeroCommitmentRevocationTxHash := mustParseHash("9a2e88b9f6703e6fa941cb390" +
+		"34fb88a7a57714ca264309e5b79ecc6f8beec5a")
+
+	// Invalid script version.
+	ticketOutInvalidScriptVersion := &MinimalOutput{
+		PkScript: hexToBytes("6a1e86c6da62556f5e21fbce3564b7374724d65f0cbb51c66d0" +
+			"0000000800058"),
+		Value:   0,
+		Version: 1,
+	}
+	ticketMinOutsInvalidScriptVersion := []*MinimalOutput{
+		ticketOut1,
+		ticketOutInvalidScriptVersion,
+		ticketOut3,
+		ticketOut4,
+		ticketOut5,
 	}
 
-	// Use everything as fees and make sure both participants are paid
-	// equally for their contibutions. Both inputs to the SStx are the
-	// same size, so this is possible.
-	copy(sstxTx.MsgTx().TxOut[3].PkScript, sstxTx.MsgTx().TxOut[1].PkScript)
-	sstxTx.MsgTx().TxOut[4].Value = 0
-	ssrtxTx.MsgTx().TxOut[0].Value = 108730066
-	ssrtxTx.MsgTx().TxOut[1].Value = 108730066
-	sstxTypes, sstxAddrs, sstxAmts, _, sstxRules, sstxLimits =
-		stake.TxSStxStakeOutputInfo(sstxTx.MsgTx())
-	ssrtxTypes, ssrtxAddrs, ssrtxAmts, err =
-		stake.TxSSRtxStakeOutputInfo(ssrtxTx.MsgTx(), &chaincfg.TestNet2Params)
-	if err != nil {
-		t.Errorf("Unexpected GetSSRtxStakeOutputInfo error: %v", err.Error())
+	// Invalid ticket commitment amount.
+	ticketOutInvalidCommitmentAmt := &MinimalOutput{
+		PkScript: hexToBytes("6a1e86c6da62556f5e21fbce3564b7374724d65f0cbbfffffff" +
+			"fffffffff0058"),
+		Value:   0,
+		Version: 0,
 	}
-	ssrtxCalcAmts = stake.CalculateRewards(sstxAmts, sstxMtx.TxOut[0].Value,
-		int64(0))
-	err = stake.VerifyStakingPkhsAndAmounts(sstxTypes,
-		sstxAddrs,
-		ssrtxAmts,
-		ssrtxTypes,
-		ssrtxAddrs,
-		ssrtxCalcAmts,
-		false, // Revocation
-		sstxRules,
-		sstxLimits)
-	if err != nil {
-		t.Errorf("Unexpected VerifyStakingPkhsAndAmounts error: %v",
-			err.Error())
+	ticketMinOutsInvalidCommitmentAmt := []*MinimalOutput{
+		ticketOut1,
+		ticketOutInvalidCommitmentAmt,
+		ticketOut3,
+		ticketOut4,
+		ticketOut5,
 	}
-	if ssrtxCalcAmts[0] != ssrtxCalcAmts[1] {
-		t.Errorf("Unexpected ssrtxCalcAmts; both values should be same but "+
-			"got %v and %v", ssrtxCalcAmts[0], ssrtxCalcAmts[1])
+
+	// No fee limit.
+	ticketOut2NoFeeLimit := &MinimalOutput{
+		PkScript: hexToBytes("6a1e86c6da62556f5e21fbce3564b7374724d65f0cbb51c66d0" +
+			"0000000800000"),
+		Value:   0,
+		Version: 0,
+	}
+	ticketMinOutsNoFeeLimit := []*MinimalOutput{
+		ticketOut1,
+		ticketOut2NoFeeLimit,
+		ticketOut3,
+		ticketOut4,
+		ticketOut5,
+	}
+
+	tests := []struct {
+		name                     string
+		ticketHash               *chainhash.Hash
+		ticketMinOuts            []*MinimalOutput
+		revocationTxFee          dcrutil.Amount
+		revocationTxVersion      uint16
+		prevHeaderBytes          []byte
+		isAutoRevocationsEnabled bool
+		wantTxHash               chainhash.Hash
+		wantErr                  error
+	}{{
+		name:                "valid with P2SH and P2PKH outputs",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOuts,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		prevHeaderBytes:     prevHeaderBytes,
+		wantTxHash:          *revocationHash,
+	}, {
+		name:                "valid with zero commitment amount",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOutsZeroCommitment,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		prevHeaderBytes:     prevHeaderBytes,
+		wantTxHash:          *zeroCommitmentRevocationTxHash,
+	}, {
+		name: "valid with P2SH and P2PKH outputs (auto revocations " +
+			"enabled",
+		ticketHash:               ticketHash,
+		ticketMinOuts:            ticketMinOuts,
+		revocationTxFee:          autoRevocationsTxFee,
+		revocationTxVersion:      autoRevocationsTxVersion,
+		prevHeaderBytes:          prevHeaderBytes,
+		isAutoRevocationsEnabled: true,
+		wantTxHash:               *autoRevocationsTxHash,
+	}, {
+		name:                "invalid ticket minimal outputs",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       nil,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		wantErr:             ErrSStxNoOutputs,
+	}, {
+		name:                "invalid script version",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOutsInvalidScriptVersion,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		prevHeaderBytes:     prevHeaderBytes,
+		wantErr:             ErrSStxInvalidOutputs,
+	}, {
+		name:                "invalid ticket commitment amount",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOutsInvalidCommitmentAmt,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		prevHeaderBytes:     prevHeaderBytes,
+		wantErr:             ErrSStxBadCommitAmount,
+	}, {
+		name:                "invalid fee",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOuts,
+		revocationTxFee:     16777217,
+		revocationTxVersion: revocationTxVersion,
+		wantErr:             ErrSSRtxInvalidFee,
+	}, {
+		name:                "invalid fee (no fee limit)",
+		ticketHash:          ticketHash,
+		ticketMinOuts:       ticketMinOutsNoFeeLimit,
+		revocationTxFee:     revocationTxFee,
+		revocationTxVersion: revocationTxVersion,
+		wantErr:             ErrSSRtxInvalidFee,
+	}, {
+		name:                     "invalid fee (auto revocations enabled)",
+		ticketHash:               ticketHash,
+		ticketMinOuts:            ticketMinOuts,
+		revocationTxFee:          revocationTxFee,
+		revocationTxVersion:      revocationTxVersion,
+		isAutoRevocationsEnabled: true,
+		wantErr:                  ErrSSRtxInvalidFee,
+	}, {
+		name:                     "invalid tx version (auto revocations enabled)",
+		ticketHash:               ticketHash,
+		ticketMinOuts:            ticketMinOuts,
+		revocationTxFee:          autoRevocationsTxFee,
+		revocationTxVersion:      revocationTxVersion,
+		isAutoRevocationsEnabled: true,
+		wantErr:                  ErrSSRtxInvalidTxVersion,
+	}}
+
+	for _, test := range tests {
+		// Create a revocation transaction with the given test parameters.
+		revocationTx, err := CreateRevocationFromTicket(test.ticketHash,
+			test.ticketMinOuts, test.revocationTxFee, test.revocationTxVersion,
+			params, test.prevHeaderBytes, test.isAutoRevocationsEnabled)
+
+		// Validate that the expected error was returned for negative tests.
+		if test.wantErr != nil {
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("%q: mismatched error -- got %T, want %T", test.name, err,
+					test.wantErr)
+			}
+			continue
+		}
+
+		// Validate that an unexpected error was not returned.
+		if err != nil {
+			t.Fatalf("%q: unexpected error creating revocation: %v", test.name, err)
+		}
+
+		// Validate that the revocation transaction was created correctly.
+		err = CheckSSRtx(revocationTx)
+		if err != nil {
+			t.Errorf("%q: unexpected error checking revocation: %v", test.name, err)
+			continue
+		}
+
+		// Validate the revocation transaction version.
+		if revocationTx.Version != test.revocationTxVersion {
+			t.Errorf("%q: mismatched tx version -- got %d, want %d", test.name,
+				revocationTx.Version, test.revocationTxVersion)
+			continue
+		}
+
+		// Validate that the resulting revocation transaction hash matches what is
+		// expected.
+		revocationTxHash := revocationTx.TxHash()
+		if revocationTxHash != test.wantTxHash {
+			t.Errorf("%q: mismatched tx hash -- got %v, want %v", test.name,
+				revocationTxHash, test.wantTxHash)
+			continue
+		}
 	}
 }
 
@@ -1520,7 +1778,7 @@ var sstxTxIn = wire.TxIn{
 	Sequence: 0xffffffff,
 }
 
-// sstxTxOut0 is the first output in the reference valid sstx
+// sstxTxOut0 is the first output in the reference valid sstx.
 var sstxTxOut0 = wire.TxOut{
 	Value:   0x2123e300, // 556000000
 	Version: 0x0000,
@@ -1539,7 +1797,7 @@ var sstxTxOut0 = wire.TxOut{
 	},
 }
 
-// sstxTxOut1 is the second output in the reference valid sstx
+// sstxTxOut1 is the second output in the reference valid sstx.
 var sstxTxOut1 = wire.TxOut{
 	Value:   0x00000000, // 0
 	Version: 0x0000,
@@ -1557,7 +1815,7 @@ var sstxTxOut1 = wire.TxOut{
 	},
 }
 
-// sstxTxOut2 is the third output in the reference valid sstx
+// sstxTxOut2 is the third output in the reference valid sstx.
 var sstxTxOut2 = wire.TxOut{
 	Value:   0x2223e300,
 	Version: 0x0000,
@@ -1577,7 +1835,7 @@ var sstxTxOut2 = wire.TxOut{
 }
 
 // sstxTxOut3 is another output in an SStx, this time instruction to pay to
-// a P2SH output
+// a P2SH output.
 var sstxTxOut3 = wire.TxOut{
 	Value:   0x00000000, // 0
 	Version: 0x0000,
@@ -1596,7 +1854,7 @@ var sstxTxOut3 = wire.TxOut{
 }
 
 // sstxTxOut4 is the another output in the reference valid sstx, and pays change
-// to a P2SH address
+// to a P2SH address.
 var sstxTxOut4 = wire.TxOut{
 	Value:   0x2223e300,
 	Version: 0x0000,
@@ -1631,8 +1889,8 @@ var sstxTxOut4VerBad = wire.TxOut{
 	},
 }
 
-// sstxMsgTx is a valid SStx MsgTx with an input and outputs and is used in various
-// tests
+// sstxMsgTx is a valid SStx MsgTx with an input and outputs and is used in
+// various tests.
 var sstxMsgTx = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1654,7 +1912,7 @@ var sstxMsgTx = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// sstxMsgTxExtraInputs is an invalid SStx MsgTx with too many inputs
+// sstxMsgTxExtraInputs is an invalid SStx MsgTx with too many inputs.
 var sstxMsgTxExtraInput = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1680,7 +1938,7 @@ var sstxMsgTxExtraInput = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// sstxMsgTxExtraOutputs is an invalid SStx MsgTx with too many outputs
+// sstxMsgTxExtraOutputs is an invalid SStx MsgTx with too many outputs.
 var sstxMsgTxExtraOutputs = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1722,7 +1980,7 @@ var sstxMsgTxExtraOutputs = &wire.MsgTx{
 }
 
 // sstxMismatchedInsOuts is an invalid SStx MsgTx with too many outputs for the
-// number of inputs it has
+// number of inputs it has.
 var sstxMismatchedInsOuts = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1759,8 +2017,8 @@ var sstxBadVersionOut = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// sstxNullDataMissing is an invalid SStx MsgTx with no address push in the second
-// output
+// sstxNullDataMissing is an invalid SStx MsgTx with no address push in the
+// second output.
 var sstxNullDataMissing = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1775,7 +2033,7 @@ var sstxNullDataMissing = &wire.MsgTx{
 }
 
 // sstxNullDataMisplaced is an invalid SStx MsgTx that has the commitment and
-// change outputs swapped
+// change outputs swapped.
 var sstxNullDataMisplaced = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1790,7 +2048,7 @@ var sstxNullDataMisplaced = &wire.MsgTx{
 }
 
 // ssgenTxIn0 is the 0th position input in a valid SSGen tx used to test out the
-// IsSSGen function
+// IsSSGen function.
 var ssgenTxIn0 = wire.TxIn{
 	PreviousOutPoint: wire.OutPoint{
 		Hash:  chainhash.Hash{},
@@ -1806,7 +2064,7 @@ var ssgenTxIn0 = wire.TxIn{
 }
 
 // ssgenTxIn1 is the 1st position input in a valid SSGen tx used to test out the
-// IsSSGen function
+// IsSSGen function.
 var ssgenTxIn1 = wire.TxIn{
 	PreviousOutPoint: wire.OutPoint{
 		Hash: chainhash.Hash([32]byte{ // Make go vet happy.
@@ -1844,8 +2102,8 @@ var ssgenTxIn1 = wire.TxIn{
 	Sequence: 0xffffffff,
 }
 
-// ssgenTxOut0 is the 0th position output in a valid SSGen tx used to test out the
-// IsSSGen function
+// ssgenTxOut0 is the 0th position output in a valid SSGen tx used to test out
+// the IsSSGen function.
 var ssgenTxOut0 = wire.TxOut{
 	Value:   0x00000000, // 0
 	Version: 0x0000,
@@ -1864,8 +2122,8 @@ var ssgenTxOut0 = wire.TxOut{
 	},
 }
 
-// ssgenTxOut1 is the 1st position output in a valid SSGen tx used to test out the
-// IsSSGen function
+// ssgenTxOut1 is the 1st position output in a valid SSGen tx used to test out
+// the IsSSGen function.
 var ssgenTxOut1 = wire.TxOut{
 	Value:   0x00000000, // 0
 	Version: 0x0000,
@@ -1876,8 +2134,8 @@ var ssgenTxOut1 = wire.TxOut{
 	},
 }
 
-// ssgenTxOut2 is the 2nd position output in a valid SSGen tx used to test out the
-// IsSSGen function
+// ssgenTxOut2 is the 2nd position output in a valid SSGen tx used to test out
+// the IsSSGen function.
 var ssgenTxOut2 = wire.TxOut{
 	Value:   0x2123e300, // 556000000
 	Version: 0x0000,
@@ -1896,7 +2154,7 @@ var ssgenTxOut2 = wire.TxOut{
 	},
 }
 
-// ssgenTxOut3 is a P2SH output
+// ssgenTxOut3 is a P2SH output.
 var ssgenTxOut3 = wire.TxOut{
 	Value:   0x2123e300, // 556000000
 	Version: 0x0000,
@@ -1931,7 +2189,7 @@ var ssgenTxOut3BadVer = wire.TxOut{
 }
 
 // ssgenMsgTx is a valid SSGen MsgTx with an input and outputs and is used in
-// various testing scenarios
+// various testing scenarios.
 var ssgenMsgTx = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1949,7 +2207,7 @@ var ssgenMsgTx = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// ssgenMsgTxExtraInput is an invalid SSGen MsgTx with too many inputs
+// ssgenMsgTxExtraInput is an invalid SSGen MsgTx with too many inputs.
 var ssgenMsgTxExtraInput = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1967,7 +2225,7 @@ var ssgenMsgTxExtraInput = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// ssgenMsgTxExtraOutputs is an invalid SSGen MsgTx with too many outputs
+// ssgenMsgTxExtraOutputs is an invalid SSGen MsgTx with too many outputs.
 var ssgenMsgTxExtraOutputs = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -1999,8 +2257,8 @@ var ssgenMsgTxExtraOutputs = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// ssgenMsgTxStakeBaseWrong is an invalid SSGen tx with the stakebase in the wrong
-// position
+// ssgenMsgTxStakeBaseWrong is an invalid SSGen tx with the stakebase in the
+// wrong position.
 var ssgenMsgTxStakeBaseWrong = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2018,7 +2276,7 @@ var ssgenMsgTxStakeBaseWrong = &wire.MsgTx{
 }
 
 // ssgenMsgTxBadVerOut is an invalid SSGen tx that contains an output with a bad
-// version
+// version.
 var ssgenMsgTxBadVerOut = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2036,8 +2294,8 @@ var ssgenMsgTxBadVerOut = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// ssgenMsgTxWrongZeroethOut is an invalid SSGen tx with the first output being not
-// an OP_RETURN push
+// ssgenMsgTxWrongZeroethOut is an invalid SSGen tx with the first output being
+// not an OP_RETURN push.
 var ssgenMsgTxWrongZeroethOut = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2054,8 +2312,8 @@ var ssgenMsgTxWrongZeroethOut = &wire.MsgTx{
 	Expiry:   0,
 }
 
-// ssgenMsgTxWrongFirstOut is an invalid SSGen tx with the second output being not
-// an OP_RETURN push
+// ssgenMsgTxWrongFirstOut is an invalid SSGen tx with the second output being
+// not an OP_RETURN push.
 var ssgenMsgTxWrongFirstOut = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2072,8 +2330,268 @@ var ssgenMsgTxWrongFirstOut = &wire.MsgTx{
 	Expiry:   0,
 }
 
+// ssgenMsgTxNoDiscriminator is a valid SSGen MsgTx with inputs/outputs and an
+// invalid OP_RETURN that has no discriminator.
+var ssgenMsgTxNoDiscriminator = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutNoDiscriminator,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidDiscriminator is a valid SSGen MsgTx with inputs/outputs
+// and an invalid OP_RETURN that has an invalid discriminator.
+var ssgenMsgTxInvalidDiscriminator = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidDiscriminator,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxUnknownDiscriminator is a valid SSGen MsgTx with inputs/outputs
+// and an invalid OP_RETURN that has an unknown discriminator.
+var ssgenMsgTxUnknownDiscriminator = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutUnknownDiscriminator,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxUnknownDiscriminator2 is a valid SSGen MsgTx with inputs/outputs
+// and an invalid OP_RETURN that is missing a byte at the end.
+var ssgenMsgTxUnknownDiscriminator2 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutUnknownDiscriminator2,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTV is a valid SSGen MsgTx with inputs/outputs and a
+// valid OP_RETURN followed by 'T','V' but has no votes.
+var ssgenMsgTxInvalidTV = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTV,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTV2 is a valid SSGen MsgTx with inputs/outputs and a
+// valid OP_RETURN followed by 'T','V' but has a short vote.
+var ssgenMsgTxInvalidTV2 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTV2,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTV3 is a valid SSGen MsgTx with inputs/outputs and a valid
+// OP_RETURN followed by 'T','V' but has one valid and one short vote.
+var ssgenMsgTxInvalidTV3 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTV3,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTV4 is a valid SSGen MsgTx with inputs/outputs and a valid
+// OP_RETURN followed by 'T','V' but has seven valid and one short vote.
+var ssgenMsgTxInvalidTV4 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTV4,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTV5 is a valid SSGen MsgTx with inputs/outputs and a valid
+// OP_RETURN followed by 'T','V' but has invalid OP_PUSHDATAX encoding.
+var ssgenMsgTxInvalidTV5 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTV5,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTVote is a valid SSGen MsgTx with inputs/outputs and a
+// valid OP_RETURN followed by 'T','V' but has an invalid vote.
+var ssgenMsgTxInvalidTVote = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTVote,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTVote2 is a valid SSGen MsgTx with inputs/outputs and a
+// valid OP_RETURN followed by 'T','V' but has an invalid vote.
+var ssgenMsgTxInvalidTVote2 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTVote2,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxInvalidTVote3 is a valid SSGen MsgTx with inputs/outputs and a
+// valid OP_RETURN followed by 'T','V' but has duplicate votes.
+var ssgenMsgTxInvalidTVote3 = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutInvalidTVote3,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
+// ssgenMsgTxValid is a valid SSGen MsgTx with inputs/outputs and a valid
+// OP_RETURN followed by 'T','V' that has 7 valid votes.
+var ssgenMsgTxValid = &wire.MsgTx{
+	SerType: wire.TxSerializeFull,
+	Version: 1,
+	TxIn: []*wire.TxIn{
+		&ssgenTxIn0,
+		&ssgenTxIn1,
+	},
+	TxOut: []*wire.TxOut{
+		&ssgenTxOut0,
+		&ssgenTxOut1,
+		&ssgenTxOut2,
+		&ssgenTxOut3,
+		&ssgenTxOutValidTV,
+	},
+	LockTime: 0,
+	Expiry:   0,
+}
+
 // ssrtxTxIn is the 0th position input in a valid SSRtx tx used to test out the
-// IsSSRtx function
+// IsSSRtx function.
 var ssrtxTxIn = wire.TxIn{
 	PreviousOutPoint: wire.OutPoint{
 		Hash: chainhash.Hash([32]byte{ // Make go vet happy.
@@ -2111,8 +2629,8 @@ var ssrtxTxIn = wire.TxIn{
 	Sequence: 0xffffffff,
 }
 
-// ssrtxTxOut is the 0th position output in a valid SSRtx tx used to test out the
-// IsSSRtx function
+// ssrtxTxOut is the 0th position output in a valid SSRtx tx used to test out
+// the IsSSRtx function.
 var ssrtxTxOut = wire.TxOut{
 	Value:   0x2122e300,
 	Version: 0x0000,
@@ -2131,7 +2649,7 @@ var ssrtxTxOut = wire.TxOut{
 	},
 }
 
-// ssrtxTxOut2 is a P2SH output
+// ssrtxTxOut2 is a P2SH output.
 var ssrtxTxOut2 = wire.TxOut{
 	Value:   0x2123e300, // 556000000
 	Version: 0x0000,
@@ -2148,7 +2666,7 @@ var ssrtxTxOut2 = wire.TxOut{
 	},
 }
 
-// ssrtxTxOut2BadVer is a P2SH output with a non-default script version
+// ssrtxTxOut2BadVer is a P2SH output with a non-default script version.
 var ssrtxTxOut2BadVer = wire.TxOut{
 	Value:   0x2123e300, // 556000000
 	Version: 0x0100,
@@ -2165,8 +2683,438 @@ var ssrtxTxOut2BadVer = wire.TxOut{
 	},
 }
 
+// ssgenTxOutNoDiscriminator is an OP_RETURN with no treasury vote
+// discriminator.
+var ssgenTxOutNoDiscriminator = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+	},
+}
+
+// ssgenTxOutInvalidDiscriminator is an OP_RETURN with an invalid treasury vote
+// discriminator length.
+var ssgenTxOutInvalidDiscriminator = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x01, // OP_DATA_1, invalid length
+		'T',
+	},
+}
+
+// ssgenTxOutUnknownDiscriminator is an OP_RETURN with an unknown treasury vote
+// discriminator.
+var ssgenTxOutUnknownDiscriminator = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x02, // OP_DATA_2
+		'T',  // Treasury
+		0x0,  // Should've been 'V'
+	},
+}
+
+var ssgenTxOutUnknownDiscriminator2 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		0x02,
+		'T', // Treasury
+		// Missing 'V'
+	},
+}
+
+// ssgenTxOutInvalidTV is an OP_RETURN with a valid treasury vote
+// discriminator but without an actual vote.
+var ssgenTxOutInvalidTV = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x02, // OP_DATA_2
+		'T',  // Treasury
+		'V',  // Vote
+	},
+}
+
+// ssgenTxOutInvalidTV2 is an OP_RETURN with a valid treasury vote
+// discriminator but with a short vote.
+var ssgenTxOutInvalidTV2 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x03, // OP_DATA_3
+		'T',  // Treasury
+		'V',  // Vote
+		0x00, // Start of vote
+	},
+}
+
+// ssgenTxOutInvalidTV3 is an OP_RETURN with a valid treasury vote
+// discriminator but with one valid vote and one short vote.
+var ssgenTxOutInvalidTV3 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x24, // OP_DATA_36
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+		0x00, // short vote
+	},
+}
+
+// ssgenTxOutInvalidTV4 is an OP_RETURN with a valid treasury vote
+// discriminator but with 7 valid votes and one short vote.
+var ssgenTxOutInvalidTV4 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		234,  // 234 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, // short vote
+	},
+}
+
+// ssgenTxOutInvalidTV5 is an OP_RETURN with a valid treasury vote
+// discriminator but with 7 valid votes but encoded with OP_PUSHDATA2.
+var ssgenTxOutInvalidTV5 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4d, // OP_PUSHDATA2
+		233,  // Little endian 233 bytes
+		0,    // 0 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+	},
+}
+
+// ssgenTxOutInvalidTVote is an OP_RETURN with an invalid treasury vote.
+var ssgenTxOutInvalidTVote = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		233,  // Little endian 233 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x01, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x02, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x03, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x04, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x05, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x06, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x03, // Vote bits, Invalid
+	},
+}
+
+// ssgenTxOutInvalidTVote2 is an OP_RETURN with an invalid treasury vote.
+var ssgenTxOutInvalidTVote2 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		233,  // Little endian 233 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x01, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x02, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x03, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x04, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x05, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x06, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x04, // Vote bits, Invalid
+	},
+}
+
+// ssgenTxOutInvalidTVote3 is an OP_RETURN with duplicate treasury votes.
+var ssgenTxOutInvalidTVote3 = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		233,  // Little endian 233 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x02, // Vote bits, No
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+	},
+}
+
+// ssgenTxOutValidTV is an OP_RETURN with a valid treasury vote discriminator
+// with 7 valid votes.
+var ssgenTxOutValidTV = wire.TxOut{
+	Value:   0x2122e300,
+	Version: 0x0000,
+	PkScript: []byte{
+		0x6a, // OP_RETURN
+		0x4c, // OP_PUSHDATA1
+		233,  // 233 bytes
+		'T',  // Treasury
+		'V',  // Vote
+
+		0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x01, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x02, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x03, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x04, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x05, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+
+		0x06, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, // 32 bytes hash
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x00, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+		0x01, // Vote bits, Yes
+	},
+}
+
 // ssrtxMsgTx is a valid SSRtx MsgTx with an input and outputs and is used in
-// various testing scenarios
+// various testing scenarios.
 var ssrtxMsgTx = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2182,7 +3130,7 @@ var ssrtxMsgTx = &wire.MsgTx{
 }
 
 // ssrtxMsgTx is a valid SSRtx MsgTx with an input and outputs and is used in
-// various testing scenarios
+// various testing scenarios.
 var ssrtxMsgTxTooManyInputs = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,
@@ -2198,7 +3146,7 @@ var ssrtxMsgTxTooManyInputs = &wire.MsgTx{
 }
 
 // ssrtxMsgTx is a valid SSRtx MsgTx with an input and outputs and is used in
-// various testing scenarios
+// various testing scenarios.
 var ssrtxMsgTxTooManyOutputs = &wire.MsgTx{
 	SerType: wire.TxSerializeFull,
 	Version: 1,

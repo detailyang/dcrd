@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,9 +10,71 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/wire"
+)
+
+const (
+	// voteIDMaxBlockSize is the vote ID for the maximum block size
+	// increase agenda used for the hard fork demo.
+	voteIDMaxBlockSize = "maxblocksize"
+
+	// voteIDSDiffAlgorithm is the vote ID for the new stake difficulty
+	// algorithm (aka ticket price) agenda defined by DCP0001.
+	voteIDSDiffAlgorithm = "sdiffalgorithm"
+
+	// voteIDLNFeatures is the vote ID for the agenda that introduces
+	// features useful for the Lightning Network (among other uses) defined
+	// by DCP0002 and DCP0003.
+	voteIDLNFeatures = "lnfeatures"
+
+	// voteIDFixLNSeqLocks is the vote ID for the agenda that corrects the
+	// sequence lock functionality needed for Lightning Network (among other
+	// uses) defined by DCP0004.
+	voteIDFixLNSeqLocks = "fixlnseqlocks"
+
+	// voteIDHeaderCommitments is the vote ID for the agenda that repurposes
+	// the stake root header field to support header commitments and provides
+	// an initial commitment to version 2 GCS filters defined by DCP0005.
+	voteIDHeaderCommitments = "headercommitments"
+
+	// voteIDTreasury is the vote ID for the agenda that enables the
+	// decentralized treasury opcodes defined by DCP0006.
+	voteIDTreasury = "treasury"
+
+	// voteIDRevertTreasuryPolicy is the vote ID for the agenda that
+	// reverts the maximum expenditure policy of the treasury account as
+	// defined by DCP0007.
+	voteIDRevertTreasuryPolicy = "reverttreasurypolicy"
+
+	// voteIDExplicitVersionUpgrades is the vote ID for the agenda that enables
+	// rejection of new transaction and script versions until they are
+	// explicitly enabled via a consensus vote as defined by DCP0008.
+	voteIDExplicitVersionUpgrades = "explicitverupgrades"
+
+	// voteIDAutoRevocations is the vote ID for the agenda that enables automatic
+	// ticket revocations as defined in DCP0009.
+	voteIDAutoRevocations = "autorevocations"
+
+	// voteIDChangeSubsidySplit is the vote ID for the agenda that changes the
+	// block reward subsidy split to 10% PoW, 80% PoS, and 10% Treasury as
+	// defined in DCP0010.
+	voteIDChangeSubsidySplit = "changesubsidysplit"
+
+	// voteIDBlake3Pow is the vote ID for the agenda that changes the proof of
+	// work hashing algorithm to BLAKE3 as defined in DCP0011.
+	voteIDBlake3Pow = "blake3pow"
+
+	// voteIDChangeSubsidySplitR2 is the vote ID for the agenda that changes the
+	// block reward subsidy split to 1% PoW, 89% PoS, and 10% Treasury as
+	// defined in DCP0012.
+	voteIDChangeSubsidySplitR2 = "changesubsidysplitr2"
+
+	// voteIDMaxTreasurySpend is the vote ID for the agenda that changes the
+	// maximum expenditure policy of the treasury account to be limited to 4% of
+	// the total available treasury per month as defined in DCP0013.
+	voteIDMaxTreasurySpend = "maxtreasuryspend"
 )
 
 // newHashFromStr converts the passed big-endian hex string into a
@@ -44,13 +106,13 @@ var (
 	// the overhead of creating it multiple times.
 	bigOne = big.NewInt(1)
 
-	// simNetPowLimit is the highest proof of work value a Decred block
-	// can have for the simulation test network.  It is the value 2^255 - 1.
-	simNetPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 255), bigOne)
+	// regNetPowLimit is the highest proof of work value a Decred block
+	// can have for the regression test network.  It is the value 2^255 - 1.
+	regNetPowLimit = new(big.Int).Sub(new(big.Int).Lsh(bigOne, 255), bigOne)
 
-	// simNetGenesisBlock defines the genesis block of the block chain which serves
-	// as the public transaction ledger for the simulation test network.
-	simNetGenesisBlock = wire.MsgBlock{
+	// regNetGenesisBlock defines the genesis block of the block chain which
+	// serves as the public transaction ledger for the regression test network.
+	regNetGenesisBlock = wire.MsgBlock{
 		Header: wire.BlockHeader{
 			Version:     1,
 			PrevBlock:   *newHashFromStr("0000000000000000000000000000000000000000000000000000000000000000"),
@@ -61,7 +123,7 @@ var (
 			Voters:      uint16(0x0000),
 			FreshStake:  uint8(0x00),
 			Revocations: uint8(0x00),
-			Timestamp:   time.Unix(1401292357, 0), // 2009-01-08 20:54:25 -0600 CST
+			Timestamp:   time.Unix(1538524800, 0), // 2018-10-03 00:00:00 +0000 UTC
 			PoolSize:    uint32(0),
 			Bits:        0x207fffff, // 545259519
 			SBits:       int64(0x0000000000000000),
@@ -76,20 +138,15 @@ var (
 					Hash:  chainhash.Hash{},
 					Index: 0xffffffff,
 				},
-				SignatureScript: fromHex("04ffff001d010445" +
-					"5468652054696d65732030332f4a616e2f" +
-					"32303039204368616e63656c6c6f72206f" +
-					"6e206272696e6b206f66207365636f6e64" +
-					"206261696c6f757420666f72206261686b73"),
-				Sequence: 0xffffffff,
+				SignatureScript: fromHex("0000"),
+				Sequence:        0xffffffff,
+				BlockIndex:      0xffffffff,
+				ValueIn:         -1,
 			}},
 			TxOut: []*wire.TxOut{{
 				Value: 0,
-				PkScript: fromHex("4104678afdb0fe5548271967f1" +
-					"a67130b7105cd6a828e03909a67962e0ea1f" +
-					"61deb649f6bc3f4cef38c4f35504e51ec138" +
-					"c4f35504e51ec112de5c384df7ba0b8d578a" +
-					"4c702b6bf11d5fac"),
+				PkScript: fromHex("801679e98561ada96caec2949a" +
+					"5d41c4cab3851eb740d951c10ecbcf265c1fd9"),
 			}},
 			LockTime: 0,
 			Expiry:   0,
@@ -98,35 +155,40 @@ var (
 	}
 )
 
-// simNetParams defines the network parameters for the simulation test Decred
-// network.
+// regNetParams defines the network parameters for the regression test network.
 //
 // NOTE: The test generator intentionally does not use the existing definitions
 // in the chaincfg package since the intent is to be able to generate known
 // good tests which exercise that code.  Using the chaincfg parameters would
 // allow them to change without the tests failing as desired.
-var simNetParams = &chaincfg.Params{
-	Name:        "simnet",
-	Net:         wire.SimNet,
-	DefaultPort: "18555",
+var regNetParams = &chaincfg.Params{
+	Name:        "regnet",
+	Net:         wire.RegNet,
+	DefaultPort: "18655",
 	DNSSeeds:    nil, // NOTE: There must NOT be any seeds.
 
 	// Chain parameters
-	GenesisBlock:             &simNetGenesisBlock,
-	GenesisHash:              newHashFromStr("5bec7567af40504e0994db3b573c186fffcc4edefe096ff2e58d00523bd7e8a6"),
-	PowLimit:                 simNetPowLimit,
-	PowLimitBits:             0x207fffff,
-	ReduceMinDifficulty:      false,
-	MinDiffReductionTime:     0, // Does not apply since ReduceMinDifficulty false
-	GenerateSupported:        true,
-	MaximumBlockSizes:        []int{1000000, 1310720},
-	MaxTxSize:                1000000,
-	TargetTimePerBlock:       time.Second,
+	GenesisBlock:         &regNetGenesisBlock,
+	GenesisHash:          *newHashFromStr("2ced94b4ae95bba344cfa043268732d230649c640f92dce2d9518823d3057cb0"),
+	PowLimit:             regNetPowLimit,
+	PowLimitBits:         0x207fffff,
+	ReduceMinDifficulty:  false,
+	MinDiffReductionTime: 0, // Does not apply since ReduceMinDifficulty false
+	GenerateSupported:    true,
+	MaximumBlockSizes:    []int{1000000, 1310720},
+	MaxTxSize:            1000000,
+	TargetTimePerBlock:   time.Second,
+
+	// Version 1 difficulty algorithm (EMA + BLAKE256) parameters.
 	WorkDiffAlpha:            1,
 	WorkDiffWindowSize:       8,
 	WorkDiffWindows:          4,
 	TargetTimespan:           time.Second * 8, // TimePerBlock * WindowSize
 	RetargetAdjustmentFactor: 4,
+
+	// Version 2 difficulty algorithm (ASERT + BLAKE3) parameters.
+	WorkDiffV2Blake3StartBits: 0x207fffff,
+	WorkDiffV2HalfLifeSecs:    6, // 6 * TimePerBlock
 
 	// Subsidy parameters.
 	BaseSubsidy:              50000000000,
@@ -134,13 +196,12 @@ var simNetParams = &chaincfg.Params{
 	DivSubsidy:               101,
 	SubsidyReductionInterval: 128,
 	WorkRewardProportion:     6,
+	WorkRewardProportionV2:   1,
 	StakeRewardProportion:    3,
+	StakeRewardProportionV2:  8,
 	BlockTaxProportion:       1,
 
-	// Checkpoints ordered from oldest to newest.
-	Checkpoints: nil,
-
-	// BIP0009 consensus rule change deployments.
+	// Consensus rule change deployments.
 	//
 	// The miner confirmation window is defined as:
 	//   target proof of work timespan / target proof of work spacing
@@ -151,7 +212,7 @@ var simNetParams = &chaincfg.Params{
 	Deployments: map[uint32][]chaincfg.ConsensusDeployment{
 		4: {{
 			Vote: chaincfg.Vote{
-				Id:          chaincfg.VoteIDMaxBlockSize,
+				Id:          voteIDMaxBlockSize,
 				Description: "Change maximum allowed block size from 1MiB to 1.25MB",
 				Mask:        0x0006, // Bits 1 and 2
 				Choices: []chaincfg.Choice{{
@@ -179,7 +240,7 @@ var simNetParams = &chaincfg.Params{
 		}},
 		5: {{
 			Vote: chaincfg.Vote{
-				Id:          chaincfg.VoteIDSDiffAlgorithm,
+				Id:          voteIDSDiffAlgorithm,
 				Description: "Change stake difficulty algorithm as defined in DCP0001",
 				Mask:        0x0006, // Bits 1 and 2
 				Choices: []chaincfg.Choice{{
@@ -207,8 +268,284 @@ var simNetParams = &chaincfg.Params{
 		}},
 		6: {{
 			Vote: chaincfg.Vote{
-				Id:          chaincfg.VoteIDLNFeatures,
+				Id:          voteIDLNFeatures,
 				Description: "Enable features defined in DCP0002 and DCP0003 necessary to support Lightning Network (LN)",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		7: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDFixLNSeqLocks,
+				Description: "Modify sequence lock handling as defined in DCP0004",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		8: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDHeaderCommitments,
+				Description: "Enable header commitments as defined in DCP0005",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		9: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDTreasury,
+				Description: "Enable decentralized Treasury opcodes as defined in DCP0006",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		10: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDRevertTreasuryPolicy,
+				Description: "Change maximum treasury expenditure policy as defined in DCP0007",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}, {
+			Vote: chaincfg.Vote{
+				Id:          voteIDExplicitVersionUpgrades,
+				Description: "Enable explicit version upgrades as defined in DCP0008",
+				Mask:        0x0018, // Bits 3 and 4
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain from voting",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0008, // Bit 3
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0010, // Bit 4
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}, {
+			Vote: chaincfg.Vote{
+				Id:          voteIDAutoRevocations,
+				Description: "Enable automatic ticket revocations as defined in DCP0009",
+				Mask:        0x0060, // Bits 5 and 6
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0020, // Bit 5
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0040, // Bit 6
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}, {
+			Vote: chaincfg.Vote{
+				Id:          voteIDChangeSubsidySplit,
+				Description: "Change block reward subsidy split to 10/80/10 as defined in DCP0010",
+				Mask:        0x0180, // Bits 7 and 8
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain from voting",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0080, // Bit 7
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0100, // Bit 8
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		11: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDBlake3Pow,
+				Description: "Change proof of work hashing algorithm to BLAKE3 as defined in DCP0011",
+				Mask:        0x0006, // Bits 1 and 2
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0002, // Bit 1
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0004, // Bit 2
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}, {
+			Vote: chaincfg.Vote{
+				Id:          voteIDChangeSubsidySplitR2,
+				Description: "Change block reward subsidy split to 1/89/10 as defined in DCP0012",
+				Mask:        0x0060, // Bits 5 and 6
+				Choices: []chaincfg.Choice{{
+					Id:          "abstain",
+					Description: "abstain voting for change",
+					Bits:        0x0000,
+					IsAbstain:   true,
+					IsNo:        false,
+				}, {
+					Id:          "no",
+					Description: "keep the existing consensus rules",
+					Bits:        0x0020, // Bit 5
+					IsAbstain:   false,
+					IsNo:        true,
+				}, {
+					Id:          "yes",
+					Description: "change to the new consensus rules",
+					Bits:        0x0040, // Bit 6
+					IsAbstain:   false,
+					IsNo:        false,
+				}},
+			},
+			StartTime:  0,             // Always available for vote
+			ExpireTime: math.MaxInt64, // Never expires
+		}},
+		12: {{
+			Vote: chaincfg.Vote{
+				Id:          voteIDMaxTreasurySpend,
+				Description: "Change maximum treasury expenditure policy as defined in DCP0013",
 				Mask:        0x0006, // Bits 1 and 2
 				Choices: []chaincfg.Choice{{
 					Id:          "abstain",
@@ -245,49 +582,65 @@ var simNetParams = &chaincfg.Params{
 	BlockRejectNumRequired:  75,
 	BlockUpgradeNumToCheck:  100,
 
-	// Mempool parameters
-	RelayNonStdTxs: true,
+	// AcceptNonStdTxs is a Mempool param to accept and relay non standard
+	// txs to the network or reject them
+	AcceptNonStdTxs: true,
 
 	// Address encoding magics
-	NetworkAddressPrefix: "S",
-	PubKeyAddrID:         [2]byte{0x27, 0x6f}, // starts with Sk
-	PubKeyHashAddrID:     [2]byte{0x0e, 0x91}, // starts with Ss
-	PKHEdwardsAddrID:     [2]byte{0x0e, 0x71}, // starts with Se
-	PKHSchnorrAddrID:     [2]byte{0x0e, 0x53}, // starts with SS
-	ScriptHashAddrID:     [2]byte{0x0e, 0x6c}, // starts with Sc
-	PrivateKeyID:         [2]byte{0x23, 0x07}, // starts with Ps
+	NetworkAddressPrefix: "R",
+	PubKeyAddrID:         [2]byte{0x25, 0xe5}, // starts with Rk
+	PubKeyHashAddrID:     [2]byte{0x0e, 0x00}, // starts with Rs
+	PKHEdwardsAddrID:     [2]byte{0x0d, 0xe0}, // starts with Re
+	PKHSchnorrAddrID:     [2]byte{0x0d, 0xc2}, // starts with RS
+	ScriptHashAddrID:     [2]byte{0x0d, 0xdb}, // starts with Rc
+	PrivateKeyID:         [2]byte{0x22, 0xfe}, // starts with Pr
 
 	// BIP32 hierarchical deterministic extended key magics
-	HDPrivateKeyID: [4]byte{0x04, 0x20, 0xb9, 0x03}, // starts with sprv
-	HDPublicKeyID:  [4]byte{0x04, 0x20, 0xbd, 0x3d}, // starts with spub
+	HDPrivateKeyID: [4]byte{0xea, 0xb4, 0x04, 0x48}, // starts with rprv
+	HDPublicKeyID:  [4]byte{0xea, 0xb4, 0xf9, 0x87}, // starts with rpub
 
 	// BIP44 coin type used in the hierarchical deterministic path for
 	// address generation.
-	HDCoinType: 115, // ASCII for s
+	SLIP0044CoinType: 1, // SLIP0044, Testnet (all coins)
+	LegacyCoinType:   1,
 
 	// Decred PoS parameters
-	MinimumStakeDiff:      20000,
-	TicketPoolSize:        64,
-	TicketsPerBlock:       5,
-	TicketMaturity:        16,
-	TicketExpiry:          384, // 6*TicketPoolSize
-	CoinbaseMaturity:      16,
-	SStxChangeMaturity:    1,
-	TicketPoolSizeWeight:  4,
-	StakeDiffAlpha:        1,
-	StakeDiffWindowSize:   8,
-	StakeDiffWindows:      8,
-	MaxFreshStakePerBlock: 20,            // 4*TicketsPerBlock
-	StakeEnabledHeight:    16 + 16,       // CoinbaseMaturity + TicketMaturity
-	StakeValidationHeight: 16 + (64 * 2), // CoinbaseMaturity + TicketPoolSize*2
-	StakeBaseSigScript:    []byte{0xde, 0xad, 0xbe, 0xef},
+	MinimumStakeDiff:        20000,
+	TicketPoolSize:          64,
+	TicketsPerBlock:         5,
+	TicketMaturity:          16,
+	TicketExpiry:            384, // 6*TicketPoolSize
+	CoinbaseMaturity:        16,
+	SStxChangeMaturity:      1,
+	TicketPoolSizeWeight:    4,
+	StakeDiffAlpha:          1,
+	StakeDiffWindowSize:     8,
+	StakeDiffWindows:        8,
+	StakeVersionInterval:    8 * 2 * 7,
+	MaxFreshStakePerBlock:   20,            // 4*TicketsPerBlock
+	StakeEnabledHeight:      16 + 16,       // CoinbaseMaturity + TicketMaturity
+	StakeValidationHeight:   16 + (64 * 2), // CoinbaseMaturity + TicketPoolSize*2
+	StakeBaseSigScript:      []byte{0x73, 0x57},
+	StakeMajorityMultiplier: 3,
+	StakeMajorityDivisor:    4,
 
 	// Decred organization related parameters
-	OrganizationPkScript:        fromHex("a914cbb08d6ca783b533b2c7d24a51fbca92d937bf9987"),
+	OrganizationPkScript:        fromHex("a9146913bcc838bd0087fb3f6b3c868423d5e300078d87"),
 	OrganizationPkScriptVersion: 0,
-	BlockOneLedger: []*chaincfg.TokenPayout{
-		{Address: "Sshw6S86G2bV6W32cbc7EhtFy8f93rU6pae", Amount: 100000 * 1e8},
-		{Address: "SsjXRK6Xz6CFuBt6PugBvrkdAa4xGbcZ18w", Amount: 100000 * 1e8},
-		{Address: "SsfXiYkYkCoo31CuVQw428N6wWKus2ZEw5X", Amount: 100000 * 1e8},
-	},
+	BlockOneLedger: []chaincfg.TokenPayout{{
+		// RsKrWb7Vny1jnzL1sDLgKTAteh9RZcRr5g6
+		ScriptVersion: 0,
+		Script:        fromHex("76a9147e4765ae88ba9ad5c9e4715c484e90b34d358d5188ac"),
+		Amount:        100000 * 1e8,
+	}, {
+		// Rs8ca5cDALtsMVD4PV3xvFTC7dmuU1juvLv
+		ScriptVersion: 0,
+		Script:        fromHex("76a91402fb1ac0137666d79165e13cecd403883615270788ac"),
+		Amount:        100000 * 1e8,
+	}, {
+		// RsHzbGt6YajuHpurtpqXXHz57LmYZK8w9tX
+		ScriptVersion: 0,
+		Script:        fromHex("76a91469de627d3231b14228653dd09cba75eeb872754288ac"),
+		Amount:        100000 * 1e8,
+	}},
 }

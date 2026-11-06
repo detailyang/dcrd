@@ -1,14 +1,9 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package treap
-
-import (
-	"math/rand"
-	"time"
-)
 
 const (
 	// staticDepth is the size of the static array to use for keeping track
@@ -119,7 +114,7 @@ func (s *parentStack) Push(node *treapNode) {
 	// This approach is used over append because reslicing the slice to pop
 	// the item causes the compiler to make unneeded allocations.  Also,
 	// since the max number of items is related to the tree depth which
-	// requires expontentially more items to increase, only increase the cap
+	// requires exponentially more items to increase, only increase the cap
 	// one item at a time.  This is more intelligent than the generic append
 	// expansion algorithm which often doubles the cap.
 	index := s.index - staticDepth
@@ -130,8 +125,4 @@ func (s *parentStack) Push(node *treapNode) {
 	}
 	s.overflow[index] = node
 	s.index++
-}
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
 }

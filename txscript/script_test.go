@@ -1,136 +1,121 @@
-// Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2013-2017 The btcsuite developers
+// Copyright (c) 2015-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package txscript_test
+package txscript
 
 import (
 	"bytes"
-	"encoding/hex"
-	"reflect"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/txscript"
-	"github.com/decred/dcrd/wire"
 )
 
-// TestPushedData ensured the PushedData function extracts the expected data out
-// of various scripts.
-func TestPushedData(t *testing.T) {
-	t.Parallel()
+// TestGetSigOpCount tests that the GetSigOpCount function behaves as expected.
+func TestGetSigOpCount(t *testing.T) {
+	// This should correspond to MaxPubKeysPerMultiSig. It's intentionally
+	// not referred to here so that any changes to MaxPubKeysPerMultisig
+	// are flagged during tests.
+	maxMultiSigOps := 20
 
-	var tests = []struct {
-		script string
-		out    [][]byte
-		valid  bool
-	}{
-		{
-			"0 IF 0 ELSE 2 ENDIF",
-			[][]byte{nil, nil},
-			true,
-		},
-		{
-			"16777216 10000000",
-			[][]byte{
-				{0x00, 0x00, 0x00, 0x01}, // 16777216
-				{0x80, 0x96, 0x98, 0x00}, // 10000000
-			},
-			true,
-		},
-		{
-			"DUP HASH160 '17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem' EQUALVERIFY CHECKSIG",
-			[][]byte{
-				// 17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem
-				{
-					0x31, 0x37, 0x56, 0x5a, 0x4e, 0x58, 0x31, 0x53, 0x4e, 0x35,
-					0x4e, 0x74, 0x4b, 0x61, 0x38, 0x55, 0x51, 0x46, 0x78, 0x77,
-					0x51, 0x62, 0x46, 0x65, 0x46, 0x63, 0x33, 0x69, 0x71, 0x52,
-					0x59, 0x68, 0x65, 0x6d,
-				},
-			},
-			true,
-		},
-		{
-			"PUSHDATA4 1000 EQUAL",
-			nil,
-			false,
-		},
+	// Build out a script that tests every opcode not on the "special list"
+	// below. These will be tested separately.
+	specialOpCodes := map[byte]struct{}{
+		OP_CHECKSIG:            {},
+		OP_CHECKSIGVERIFY:      {},
+		OP_CHECKSIGALT:         {},
+		OP_CHECKSIGALTVERIFY:   {},
+		OP_CHECKMULTISIG:       {},
+		OP_CHECKMULTISIGVERIFY: {},
+		OP_TADD:                {},
+		OP_TGEN:                {},
+		OP_TSPEND:              {},
+	}
+	otherOpCodesScript := ""
+	for i := 0; i <= 255; i++ {
+		if _, ok := specialOpCodes[byte(i)]; ok {
+			continue
+		}
+		otherOpCodesScript = fmt.Sprintf("%s 0x%.2x", otherOpCodesScript, i)
 	}
 
-	for i, test := range tests {
-		script := mustParseShortForm(test.script)
-		data, err := txscript.PushedData(script)
-		if test.valid && err != nil {
-			t.Errorf("TestPushedData failed test #%d: %v\n", i, err)
-			continue
-		} else if !test.valid && err == nil {
-			t.Errorf("TestPushedData failed test #%d: test should "+
-				"be invalid\n", i)
-			continue
-		}
-		if !reflect.DeepEqual(data, test.out) {
-			t.Errorf("TestPushedData failed test #%d: want: %x "+
-				"got: %x\n", i, test.out, data)
-		}
-	}
-}
+	testCases := []struct {
+		name              string
+		script            string
+		wantCount         int
+		wantTreasuryCount int
+	}{{
+		name:              "all opcodes that dont count for a sigop",
+		script:            otherOpCodesScript,
+		wantCount:         0,
+		wantTreasuryCount: 0,
+	}, {
+		name:              "all opcodes that count for a sigop",
+		script:            "CHECKSIG CHECKSIGVERIFY CHECKSIGALT CHECKSIGALTVERIFY",
+		wantCount:         4,
+		wantTreasuryCount: 4,
+	}, {
+		name:              "multisig with < MaxPubKeysPerMultiSig",
+		script:            "2 DATA_33 0x00{33} 0x00{33} 0x00{33} 3 OP_CHECKMULTISIG",
+		wantCount:         maxMultiSigOps,
+		wantTreasuryCount: maxMultiSigOps,
+	}, {
+		name:              "multisigverify with less than MaxPubKeysPerMultiSig",
+		script:            "2 DATA_33 0x00{33} 0x00{33} 0x00{33} 3 OP_CHECKMULTISIGVERIFY",
+		wantCount:         maxMultiSigOps,
+		wantTreasuryCount: maxMultiSigOps,
+	}, {
+		name:              "valid p2pkh output",
+		script:            "DUP HASH160 DATA_20 0x00{20} EQUALVERIFY CHECKSIG",
+		wantCount:         1,
+		wantTreasuryCount: 1,
+	}, {
+		name:              "valid p2sh output",
+		script:            "HASH160 DATA_20 0x00{20} EQUAL",
+		wantCount:         0,
+		wantTreasuryCount: 0,
+	}, {
+		name:              "valid stake change output",
+		script:            "SSTXCHANGE DUP HASH160 DATA_20 0x00{20} EQUALVERIFY CHECKSIG",
+		wantCount:         1,
+		wantTreasuryCount: 1,
+	}, {
+		name:              "valid tspend output",
+		script:            "TGEN DUP HASH160 DATA_20 0x00{20} EQUALVERIFY CHECKSIG",
+		wantCount:         1,
+		wantTreasuryCount: 1,
+	}, {
+		name:              "valid tspend input",
+		script:            "DATA_64 0x00{64} TSPEND",
+		wantCount:         0,
+		wantTreasuryCount: 1,
+	}, {
+		name:              "valid tadd output",
+		script:            "TADD",
+		wantCount:         0,
+		wantTreasuryCount: 0,
+	}}
 
-// TestHasCanonicalPush ensures the canonicalPush function works as expected.
-func TestHasCanonicalPush(t *testing.T) {
-	t.Parallel()
-
-	for i := 0; i < 65535; i++ {
-		builder := txscript.NewScriptBuilder()
-		builder.AddInt64(int64(i))
-		script, err := builder.Script()
-		if err != nil {
-			t.Errorf("Script: test #%d unexpected error: %v\n", i,
-				err)
-			continue
-		}
-		if result := txscript.IsPushOnlyScript(script); !result {
-			t.Errorf("IsPushOnlyScript: test #%d failed: %x\n", i,
-				script)
-			continue
-		}
-		pops, err := txscript.TstParseScript(script)
-		if err != nil {
-			t.Errorf("TstParseScript: #%d failed: %v", i, err)
-			continue
-		}
-		for _, pop := range pops {
-			if result := txscript.TstHasCanonicalPushes(pop); !result {
-				t.Errorf("TstHasCanonicalPushes: test #%d "+
-					"failed: %x\n", i, script)
-				break
+	for i := range testCases {
+		tc := &testCases[i]
+		t.Run(tc.name, func(t *testing.T) {
+			script := mustParseShortFormV0(tc.script)
+			gotCount := GetSigOpCount(script, false)
+			if gotCount != tc.wantCount {
+				t.Fatalf("unexpected sigOpCount with treasury=false. "+
+					"want=%d got=%d", tc.wantCount, gotCount)
 			}
-		}
-	}
-	for i := 0; i <= txscript.MaxScriptElementSize; i++ {
-		builder := txscript.NewScriptBuilder()
-		builder.AddData(bytes.Repeat([]byte{0x49}, i))
-		script, err := builder.Script()
-		if err != nil {
-			t.Errorf("StandardPushesTests test #%d unexpected error: %v\n", i, err)
-			continue
-		}
-		if result := txscript.IsPushOnlyScript(script); !result {
-			t.Errorf("StandardPushesTests IsPushOnlyScript test #%d failed: %x\n", i, script)
-			continue
-		}
-		pops, err := txscript.TstParseScript(script)
-		if err != nil {
-			t.Errorf("StandardPushesTests #%d failed to TstParseScript: %v", i, err)
-			continue
-		}
-		for _, pop := range pops {
-			if result := txscript.TstHasCanonicalPushes(pop); !result {
-				t.Errorf("StandardPushesTests TstHasCanonicalPushes test #%d failed: %x\n", i, script)
-				break
+
+			gotTreasuryCount := GetSigOpCount(script, true)
+			if gotTreasuryCount != tc.wantTreasuryCount {
+				t.Fatalf("unexpected sigOpCount with treasury=true. "+
+					"want=%d got=%d", tc.wantTreasuryCount,
+					gotTreasuryCount)
 			}
-		}
+		})
 	}
 }
 
@@ -143,125 +128,52 @@ func TestGetPreciseSigOps(t *testing.T) {
 		name      string
 		scriptSig []byte
 		nSigOps   int
-		err       error
-	}{
-		{
-			name:      "scriptSig doesn't parse",
-			scriptSig: []byte{txscript.OP_PUSHDATA1, 2},
-			err:       txscript.ErrStackShortScript,
-		},
-		{
-			name:      "scriptSig isn't push only",
-			scriptSig: []byte{txscript.OP_1, txscript.OP_DUP},
-			nSigOps:   0,
-		},
-		{
-			name:      "scriptSig length 0",
-			scriptSig: nil,
-			nSigOps:   0,
-		},
-		{
-			name: "No script at the end",
-			// No script at end but still push only.
-			scriptSig: []byte{txscript.OP_1, txscript.OP_1},
-			nSigOps:   0,
-		},
-		{
-			name: "pushed script doesn't parse",
-			scriptSig: []byte{txscript.OP_DATA_2,
-				txscript.OP_PUSHDATA1, 2},
-			err: txscript.ErrStackShortScript,
-		},
+	}{{
+		name:      "scriptSig doesn't parse",
+		scriptSig: mustParseShortFormV0("PUSHDATA1 0x02"),
+	}, {
+		name:      "scriptSig isn't push only",
+		scriptSig: mustParseShortFormV0("1 DUP"),
+		nSigOps:   0,
+	}, {
+		name:      "scriptSig length 0",
+		scriptSig: nil,
+		nSigOps:   0,
+	}, {
+		// No script at end but still push only.
+		name:      "No script at the end",
+		scriptSig: mustParseShortFormV0("1 1"),
+		nSigOps:   0,
+	}, {
+		name:      "pushed script doesn't parse",
+		scriptSig: mustParseShortFormV0("DATA_2 PUSHDATA1 0x02"),
+	}}
+
+	// The signature in the p2sh script is nonsensical for the tests since
+	// this script will never be executed.  What matters is that it matches
+	// the right pattern. Without treasury enabled.
+	pkScript := mustParseShortFormV0("HASH160 DATA_20 0x433ec2ac1ffa1b7b7d0" +
+		"27f564529c57197f9ae88 EQUAL")
+	for _, test := range tests {
+		count := GetPreciseSigOpCount(test.scriptSig, pkScript,
+			noTreasury)
+		if count != test.nSigOps {
+			t.Errorf("%s: expected count of %d, got %d", test.name,
+				test.nSigOps, count)
+		}
 	}
 
 	// The signature in the p2sh script is nonsensical for the tests since
 	// this script will never be executed.  What matters is that it matches
-	// the right pattern.
-	pkScript := mustParseShortForm("HASH160 DATA_20 0x433ec2ac1ffa1b7b7d0" +
+	// the right pattern. With treasury enabled.
+	pkScript = mustParseShortFormV0("HASH160 DATA_20 0x433ec2ac1ffa1b7b7d0" +
 		"27f564529c57197f9ae88 EQUAL")
 	for _, test := range tests {
-		count := txscript.GetPreciseSigOpCount(test.scriptSig, pkScript,
-			true)
+		count := GetPreciseSigOpCount(test.scriptSig, pkScript,
+			withTreasury)
 		if count != test.nSigOps {
 			t.Errorf("%s: expected count of %d, got %d", test.name,
 				test.nSigOps, count)
-
-		}
-	}
-}
-
-// TestRemoveOpcodes ensures that removing opcodes from scripts behaves as
-// expected.
-func TestRemoveOpcodes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		before string
-		remove byte
-		err    error
-		after  string
-	}{
-		{
-			// Nothing to remove.
-			name:   "nothing to remove",
-			before: "NOP",
-			remove: txscript.OP_CODESEPARATOR,
-			after:  "NOP",
-		},
-		{
-			// Test basic opcode removal.
-			name:   "codeseparator 1",
-			before: "NOP CODESEPARATOR TRUE",
-			remove: txscript.OP_CODESEPARATOR,
-			after:  "NOP TRUE",
-		},
-		{
-			// The opcode in question is actually part of the data
-			// in a previous opcode.
-			name:   "codeseparator by coincidence",
-			before: "NOP DATA_1 CODESEPARATOR TRUE",
-			remove: txscript.OP_CODESEPARATOR,
-			after:  "NOP DATA_1 CODESEPARATOR TRUE",
-		},
-		{
-			name:   "invalid opcode",
-			before: "CAT",
-			remove: txscript.OP_CODESEPARATOR,
-			after:  "CAT",
-		},
-		{
-			name:   "invalid length (insruction)",
-			before: "PUSHDATA1",
-			remove: txscript.OP_CODESEPARATOR,
-			err:    txscript.ErrStackShortScript,
-		},
-		{
-			name:   "invalid length (data)",
-			before: "PUSHDATA1 0xff 0xfe",
-			remove: txscript.OP_CODESEPARATOR,
-			err:    txscript.ErrStackShortScript,
-		},
-	}
-
-	for _, test := range tests {
-		before := mustParseShortForm(test.before)
-		after := mustParseShortForm(test.after)
-		result, err := txscript.TstRemoveOpcode(before, test.remove)
-		if test.err != nil {
-			if err != test.err {
-				t.Errorf("%s: got unexpected error. exp: \"%v\" "+
-					"got: \"%v\"", test.name, test.err, err)
-			}
-			return
-		}
-		if err != nil {
-			t.Errorf("%s: unexpected failure: \"%v\"", test.name, err)
-			return
-		}
-		if !bytes.Equal(after, result) {
-			t.Errorf("%s: value does not equal expected: exp: \"%v\""+
-				" got: \"%v\"", test.name, after, result)
 		}
 	}
 }
@@ -277,210 +189,401 @@ func TestRemoveOpcodeByData(t *testing.T) {
 		remove []byte
 		err    error
 		after  []byte
-	}{
-		{
-			name:   "nothing to do",
-			before: []byte{txscript.OP_NOP},
-			remove: []byte{1, 2, 3, 4},
-			after:  []byte{txscript.OP_NOP},
-		},
-		{
-			name:   "simple case",
-			before: []byte{txscript.OP_DATA_4, 1, 2, 3, 4},
-			remove: []byte{1, 2, 3, 4},
-			after:  nil,
-		},
-		{
-			name:   "simple case (miss)",
-			before: []byte{txscript.OP_DATA_4, 1, 2, 3, 4},
-			remove: []byte{1, 2, 3, 5},
-			after:  []byte{txscript.OP_DATA_4, 1, 2, 3, 4},
-		},
-		// fix to allow for decred tests too
-		/*
-			{
-				name:        "stakesubmission",
-				scriptclass: txscript.StakeSubmissionTy,
-				stringed:    "stakesubmission",
-			},
-			{
-				name:        "stakegen",
-				scriptclass: txscript.StakeGenTy,
-				stringed:    "stakegen",
-			},
-			{
-				name:        "stakerevoke",
-				scriptclass: txscript.StakeRevocationTy,
-				stringed:    "stakerevoke",
-			},
-		*/
-		{
-			// padded to keep it canonical.
-			name: "simple case (pushdata1)",
-			before: append(append([]byte{txscript.OP_PUSHDATA1, 76},
-				bytes.Repeat([]byte{0}, 72)...),
-				[]byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 4},
-			after:  nil,
-		},
-		{
-			name: "simple case (pushdata1 miss)",
-			before: append(append([]byte{txscript.OP_PUSHDATA1, 76},
-				bytes.Repeat([]byte{0}, 72)...),
-				[]byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 5},
-			after: append(append([]byte{txscript.OP_PUSHDATA1, 76},
-				bytes.Repeat([]byte{0}, 72)...),
-				[]byte{1, 2, 3, 4}...),
-		},
-		{
-			name:   "simple case (pushdata1 miss noncanonical)",
-			before: []byte{txscript.OP_PUSHDATA1, 4, 1, 2, 3, 4},
-			remove: []byte{1, 2, 3, 4},
-			after:  []byte{txscript.OP_PUSHDATA1, 4, 1, 2, 3, 4},
-		},
-		{
-			name: "simple case (pushdata2)",
-			before: append(append([]byte{txscript.OP_PUSHDATA2, 0, 1},
-				bytes.Repeat([]byte{0}, 252)...),
-				[]byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 4},
-			after:  nil,
-		},
-		{
-			name: "simple case (pushdata2 miss)",
-			before: append(append([]byte{txscript.OP_PUSHDATA2, 0, 1},
-				bytes.Repeat([]byte{0}, 252)...),
-				[]byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 4, 5},
-			after: append(append([]byte{txscript.OP_PUSHDATA2, 0, 1},
-				bytes.Repeat([]byte{0}, 252)...),
-				[]byte{1, 2, 3, 4}...),
-		},
-		{
-			name:   "simple case (pushdata2 miss noncanonical)",
-			before: []byte{txscript.OP_PUSHDATA2, 4, 0, 1, 2, 3, 4},
-			remove: []byte{1, 2, 3, 4},
-			after:  []byte{txscript.OP_PUSHDATA2, 4, 0, 1, 2, 3, 4},
-		},
-		{
-			// This is padded to make the push canonical.
-			name: "simple case (pushdata4)",
-			before: append(append([]byte{txscript.OP_PUSHDATA4, 0, 0, 1, 0},
-				bytes.Repeat([]byte{0}, 65532)...),
-				[]byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 4},
-			after:  nil,
-		},
-		{
-			name:   "simple case (pushdata4 miss noncanonical)",
-			before: []byte{txscript.OP_PUSHDATA4, 4, 0, 0, 0, 1, 2, 3, 4},
-			remove: []byte{1, 2, 3, 4},
-			after:  []byte{txscript.OP_PUSHDATA4, 4, 0, 0, 0, 1, 2, 3, 4},
-		},
-		{
-			// This is padded to make the push canonical.
-			name: "simple case (pushdata4 miss)",
-			before: append(append([]byte{txscript.OP_PUSHDATA4, 0, 0, 1, 0},
-				bytes.Repeat([]byte{0}, 65532)...), []byte{1, 2, 3, 4}...),
-			remove: []byte{1, 2, 3, 4, 5},
-			after: append(append([]byte{txscript.OP_PUSHDATA4, 0, 0, 1, 0},
-				bytes.Repeat([]byte{0}, 65532)...), []byte{1, 2, 3, 4}...),
-		},
-		{
-			name:   "invalid opcode ",
-			before: []byte{txscript.OP_UNKNOWN193},
-			remove: []byte{1, 2, 3, 4},
-			after:  []byte{txscript.OP_UNKNOWN193},
-		},
-		{
-			name:   "invalid length (instruction)",
-			before: []byte{txscript.OP_PUSHDATA1},
-			remove: []byte{1, 2, 3, 4},
-			err:    txscript.ErrStackShortScript,
-		},
-		{
-			name:   "invalid length (data)",
-			before: []byte{txscript.OP_PUSHDATA1, 255, 254},
-			remove: []byte{1, 2, 3, 4},
-			err:    txscript.ErrStackShortScript,
-		},
+	}{{
+		name:   "nothing to do",
+		before: mustParseShortFormV0("NOP"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("NOP"),
+	}, {
+		name:   "simple case",
+		before: mustParseShortFormV0("DATA_4 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  nil,
+	}, {
+		name:   "simple case (miss)",
+		before: mustParseShortFormV0("DATA_4 0x01020304"),
+		remove: []byte{1, 2, 3, 5},
+		after:  mustParseShortFormV0("DATA_4 0x01020304"),
+	}, {
+		name: "stakesubmission simple case p2pkh",
+		before: mustParseShortFormV0("SSTX DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("SSTX DUP HASH160 EQUALVERIFY CHECKSIG"),
+	}, {
+		name: "stakesubmission simple case p2pkh (miss)",
+		before: mustParseShortFormV0("SSTX DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("SSTX DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+	}, {
+		name: "stakesubmission simple case p2sh",
+		before: mustParseShortFormV0("SSTX HASH160 DATA_20 0x00{16} 0x01020304 " +
+			"EQUAL"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("SSTX HASH160 EQUAL"),
+	}, {
+		name: "stakesubmission simple case p2sh (miss)",
+		before: mustParseShortFormV0("SSTX HASH160 DATA_20 0x00{16} 0x01020304 " +
+			"EQUAL"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("SSTX HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+	}, {
+		name: "stakegen simple case p2pkh",
+		before: mustParseShortFormV0("SSGEN DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("SSGEN DUP HASH160 EQUALVERIFY CHECKSIG"),
+	}, {
+		name: "stakegen simple case p2pkh (miss)",
+		before: mustParseShortFormV0("SSGEN DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("SSGEN DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+	}, {
+		name: "stakegen simple case p2sh",
+		before: mustParseShortFormV0("SSGEN HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("SSGEN HASH160 EQUAL"),
+	}, {
+		name: "stakegen simple case p2sh (miss)",
+		before: mustParseShortFormV0("SSGEN HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("SSGEN HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+	}, {
+		name: "stakerevoke simple case p2pkh",
+		before: mustParseShortFormV0("SSRTX DUP HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUALVERIFY CHECKSIG"),
+		remove: []byte{1, 2, 3, 4},
+		after:  []byte{OP_SSRTX, OP_DUP, OP_HASH160, OP_EQUALVERIFY, OP_CHECKSIG},
+	}, {
+		name: "stakerevoke simple case p2pkh (miss)",
+		before: mustParseShortFormV0("SSRTX DUP HASH160 DATA_20 0x00{20} " +
+			"EQUALVERIFY CHECKSIG"),
+		remove: bytes.Repeat([]byte{0}, 21),
+		after: mustParseShortFormV0("SSRTX DUP HASH160 DATA_20 0x00{20} " +
+			"EQUALVERIFY CHECKSIG"),
+	}, {
+		name: "stakerevoke simple case p2sh",
+		before: mustParseShortFormV0("SSRTX HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("SSRTX HASH160 EQUAL"),
+	}, {
+		name: "stakerevoke simple case p2sh (miss)",
+		before: mustParseShortFormV0("SSRTX HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("SSRTX HASH160 DATA_20 0x00{16} " +
+			"0x01020304 EQUAL"),
+	}, {
+		// padded to keep it canonical.
+		name:   "simple case (pushdata1)",
+		before: mustParseShortFormV0("PUSHDATA1 0x4c 0x00{72} 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  nil,
+	}, {
+		name:   "simple case (pushdata1 miss)",
+		before: mustParseShortFormV0("PUSHDATA1 0x4c 0x00{72} 0x01020304"),
+		remove: []byte{1, 2, 3, 5},
+		after:  mustParseShortFormV0("PUSHDATA1 0x4c 0x00{72} 0x01020304"),
+	}, {
+		name:   "simple case (pushdata1 miss noncanonical)",
+		before: mustParseShortFormV0("PUSHDATA1 0x04 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("PUSHDATA1 0x04 0x01020304"),
+	}, {
+		name:   "simple case (pushdata2)",
+		before: mustParseShortFormV0("PUSHDATA2 0x0001 0x00{252} 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  nil,
+	}, {
+		name:   "simple case (pushdata2 miss)",
+		before: mustParseShortFormV0("PUSHDATA2 0x0001 0x00{252} 0x01020304"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after:  mustParseShortFormV0("PUSHDATA2 0x0001 0x00{252} 0x01020304"),
+	}, {
+		name:   "simple case (pushdata2 miss noncanonical)",
+		before: mustParseShortFormV0("PUSHDATA2 0x0400 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("PUSHDATA2 0x0400 0x01020304"),
+	}, {
+		// This is padded to make the push canonical.
+		name: "simple case (pushdata4)",
+		before: mustParseShortFormV0("PUSHDATA4 0x00000100 0x00{65532} " +
+			"0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  nil,
+	}, {
+		name:   "simple case (pushdata4 miss noncanonical)",
+		before: mustParseShortFormV0("PUSHDATA4 0x04000000 0x01020304"),
+		remove: []byte{1, 2, 3, 4},
+		after:  mustParseShortFormV0("PUSHDATA4 0x04000000 0x01020304"),
+	}, {
+		// This is padded to make the push canonical.
+		name: "simple case (pushdata4 miss)",
+		before: mustParseShortFormV0("PUSHDATA4 0x00000100 0x00{65532} " +
+			"0x01020304"),
+		remove: []byte{1, 2, 3, 4, 5},
+		after: mustParseShortFormV0("PUSHDATA4 0x00000100 0x00{65532} " +
+			"0x01020304"),
+	}, {
+		name:   "invalid opcode",
+		before: []byte{OP_UNKNOWN240},
+		remove: []byte{1, 2, 3, 4},
+		after:  []byte{OP_UNKNOWN240},
+	}, {
+		name:   "invalid length (instruction)",
+		before: []byte{OP_PUSHDATA1},
+		remove: []byte{1, 2, 3, 4},
+		err:    ErrMalformedPush,
+	}, {
+		name:   "invalid length (data)",
+		before: []byte{OP_PUSHDATA1, 255, 254},
+		remove: []byte{1, 2, 3, 4},
+		err:    ErrMalformedPush,
+	}}
+
+	// tstRemoveOpcodeByData is a convenience function to ensure the provided
+	// script parses before attempting to remove the passed data.
+	const scriptVersion = 0
+	tstRemoveOpcodeByData := func(script []byte, data []byte) ([]byte, error) {
+		if err := checkScriptParses(scriptVersion, script); err != nil {
+			return nil, err
+		}
+
+		return removeOpcodeByData(script, data), nil
 	}
 
 	for _, test := range tests {
-		result, err := txscript.TstRemoveOpcodeByData(test.before,
-			test.remove)
-		if test.err != nil {
-			if err != test.err {
-				t.Errorf("%s: got unexpected error. exp: \"%v\" "+
-					"got: \"%v\"", test.name, test.err, err)
-			}
-			return
+		result, err := tstRemoveOpcodeByData(test.before, test.remove)
+		if !errors.Is(err, test.err) {
+			t.Errorf("%s: unexpected error -- got %v, want %v", test.name, err,
+				test.err)
+			continue
 		}
-		if err != nil {
-			t.Errorf("%s: unexpected failure: \"%v\"", test.name, err)
-			return
-		}
-		if !bytes.Equal(test.after, result) {
-			t.Errorf("%s: value does not equal expected: exp: \"%v\""+
-				" got: \"%v\"", test.name, test.after, result)
+
+		if !bytes.Equal(result, test.after) {
+			t.Errorf("%s: value does not equal expected -- got: %x, want %x",
+				test.name, result, test.after)
 		}
 	}
 }
 
 // TestIsPayToScriptHash ensures the IsPayToScriptHash function returns the
-// expected results for all the scripts in scriptClassTests.
+// expected results.
 func TestIsPayToScriptHash(t *testing.T) {
 	t.Parallel()
 
-	for _, test := range scriptClassTests {
-		script := mustParseShortForm(test.script)
-		shouldBe := (test.class == txscript.ScriptHashTy)
-		p2sh := txscript.IsPayToScriptHash(script)
-		if p2sh != shouldBe {
-			t.Errorf("%s: epxected p2sh %v, got %v", test.name,
-				shouldBe, p2sh)
+	// Convience function that combines fmt.Sprintf with mustParseShortFormV0
+	// to create more compact tests.
+	p := func(format string, a ...interface{}) []byte {
+		return mustParseShortFormV0(fmt.Sprintf(format, a...))
+	}
+
+	// Script hash for a 2-of-3 multisig composed of the following public keys:
+	// pk1: 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+	// pk2: 02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
+	// pk3: 03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556
+	p2sh := "f86b5a7c6d32566aa4dccc04d1533530b4d64cf3"
+
+	tests := []struct {
+		name   string // test description
+		script []byte // script to examine
+		want   bool   // expected p2sh?
+	}{{
+		name:   "almost v0 p2sh -- wrong hash length",
+		script: p("HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 p2sh -- trailing opcode",
+		script: p("HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 p2sh",
+		script: p("HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}}
+
+	for _, test := range tests {
+		got := IsPayToScriptHash(test.script)
+		if got != test.want {
+			t.Errorf("%q: unexpected result -- got %v, want %v", test.name,
+				got, test.want)
 		}
 	}
 }
 
-// TestHasCanonicalPushes ensures the canonicalPush function properly determines
-// what is considered a canonical push for the purposes of removeOpcodeByData.
+// TestIsAnyKindOfScriptHash ensures the isAnyKindOfScriptHash function returns
+// the expected results.
+func TestIsAnyKindOfScriptHash(t *testing.T) {
+	t.Parallel()
+
+	// Convience function that combines fmt.Sprintf with mustParseShortFormV0
+	// to create more compact tests.
+	p := func(format string, a ...interface{}) []byte {
+		return mustParseShortFormV0(fmt.Sprintf(format, a...))
+	}
+
+	// Script hash for a 2-of-3 multisig composed of the following public keys:
+	// pk1: 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+	// pk2: 02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
+	// pk3: 03fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556
+	p2sh := "f86b5a7c6d32566aa4dccc04d1533530b4d64cf3"
+
+	tests := []struct {
+		name   string // test description
+		script []byte // script to examine
+		isTrsy bool   // whether script involves a treasury opcode
+		want   bool   // expected result
+	}{{
+		name:   "almost v0 p2sh -- wrong hash length",
+		script: p("HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 p2sh -- trailing opcode",
+		script: p("HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 p2sh",
+		script: p("HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}, {
+		name:   "almost v0 stake submission  p2sh -- wrong hash length",
+		script: p("SSTX HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 stake submission  p2sh -- trailing opcode",
+		script: p("SSTX HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 stake submission p2sh",
+		script: p("SSTX HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}, {
+		name:   "almost v0 stake gen p2sh -- wrong hash length",
+		script: p("SSGEN HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 stake gen p2sh -- trailing opcode",
+		script: p("SSGEN HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 stake gen p2sh",
+		script: p("SSGEN HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}, {
+		name:   "almost v0 stake revocation p2sh -- wrong hash length",
+		script: p("SSRTX HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 stake revocation p2sh -- trailing opcode",
+		script: p("SSRTX HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 stake revocation p2sh",
+		script: p("SSRTX HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}, {
+		name:   "almost v0 stake change p2sh -- wrong hash length",
+		script: p("SSTXCHANGE HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		want:   false,
+	}, {
+		name:   "almost v0 stake change p2sh -- trailing opcode",
+		script: p("SSTXCHANGE HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		want:   false,
+	}, {
+		name:   "v0 stake change p2sh",
+		script: p("SSTXCHANGE HASH160 DATA_20 0x%s EQUAL", p2sh),
+		want:   true,
+	}, {
+		name:   "almost v0 treasury gen p2sh -- wrong hash length",
+		script: p("TGEN HASH160 DATA_21 0x00%s EQUAL", p2sh),
+		isTrsy: true,
+		want:   false,
+	}, {
+		name:   "almost v0 treasury gen p2sh -- trailing opcode",
+		script: p("TGEN HASH160 DATA_20 0x%s EQUAL TRUE", p2sh),
+		isTrsy: true,
+		want:   false,
+	}, {
+		name:   "v0 treasury gen p2sh",
+		script: p("TGEN HASH160 DATA_20 0x%s EQUAL", p2sh),
+		isTrsy: true,
+		want:   true,
+	}}
+
+	for _, test := range tests {
+		// Run the tests with and without treasury enabled.
+		for _, flags := range []ScriptFlags{0, ScriptVerifyTreasury} {
+			vm := Engine{flags: flags}
+			got := vm.isAnyKindOfScriptHash(test.script)
+			want := test.want && (!test.isTrsy || flags != 0)
+			if got != want {
+				t.Errorf("%q: unexpected result -- got %v, want %v", test.name,
+					got, want)
+			}
+		}
+	}
+}
+
+// TestHasCanonicalPushes ensures the isCanonicalPush function properly
+// determines what is considered a canonical push for the purposes of
+// removeOpcodeByData and script null data checks.
 func TestHasCanonicalPushes(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name     string
-		script   string
-		expected bool
-	}{
-		{
-			name: "does not parse",
-			script: "0x046708afdb0fe5548271967f1a67130b7105cd6a82" +
-				"8e03909a67962e0ea1f61d",
-			expected: false,
-		},
-		{
-			name:     "non-canonical push",
-			script:   "PUSHDATA1 0x04 0x01020304",
-			expected: false,
-		},
+	const scriptVersion = 0
+	type canonicalPushTest struct {
+		name     string // test description
+		script   string // short form script to test
+		expected bool   // expected result
+	}
+	tests := []canonicalPushTest{{
+		name: "does not parse",
+		script: "0x046708afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e" +
+			"0ea1f61d",
+		expected: false,
+	}, {
+		name:     "non-canonical push",
+		script:   "PUSHDATA1 0x04 0x01020304",
+		expected: false,
+	}}
+	for i := 0; i < 65535; i++ {
+		tests = append(tests, canonicalPushTest{
+			name:     fmt.Sprintf("canonical push of integer %d", i),
+			script:   fmt.Sprintf("%d", i),
+			expected: true,
+		})
+	}
+	for i := 0; i <= MaxScriptElementSize; i++ {
+		tests = append(tests, canonicalPushTest{
+			name:     fmt.Sprintf("canonical push of %d bytes of data", i),
+			script:   fmt.Sprintf("'a'{%d}", i),
+			expected: true,
+		})
 	}
 
-	for i, test := range tests {
-		script := mustParseShortForm(test.script)
-		pops, err := txscript.TstParseScript(script)
-		if err != nil {
+	for _, test := range tests {
+		script := mustParseShortForm(scriptVersion, test.script)
+		if err := checkScriptParses(scriptVersion, script); err != nil {
 			if test.expected {
-				t.Errorf("TstParseScript #%d failed: %v", i, err)
+				t.Errorf("%s: script parse failed: %v", test.name, err)
 			}
 			continue
 		}
-		for _, pop := range pops {
-			if txscript.TstHasCanonicalPushes(pop) != test.expected {
-				t.Errorf("TstHasCanonicalPushes: #%d (%s) "+
-					"wrong result\ngot: %v\nwant: %v", i,
-					test.name, true, test.expected)
+		tokenizer := MakeScriptTokenizer(scriptVersion, script)
+		for tokenizer.Next() {
+			result := isCanonicalPush(tokenizer.Opcode(), tokenizer.Data())
+			if result != test.expected {
+				t.Errorf("%s: wrong result -- got %v, want: %v", test.name,
+					result, test.expected)
 				break
 			}
 		}
@@ -492,90 +595,39 @@ func TestHasCanonicalPushes(t *testing.T) {
 func TestIsPushOnlyScript(t *testing.T) {
 	t.Parallel()
 
-	test := struct {
-		name     string
-		script   []byte
-		expected bool
-	}{
+	type pushOnlyTest struct {
+		name     string // test description
+		script   string // short form script to test
+		expected bool   // expected result
+	}
+	tests := []pushOnlyTest{{
 		name: "does not parse",
-		script: mustParseShortForm("0x046708afdb0fe5548271967f1a67130" +
-			"b7105cd6a828e03909a67962e0ea1f61d"),
+		script: "0x046708afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0" +
+			"ea1f61d",
 		expected: false,
+	}}
+	for i := 0; i < 65535; i++ {
+		tests = append(tests, pushOnlyTest{
+			name:     fmt.Sprintf("canonical push of integer %d", i),
+			script:   fmt.Sprintf("%d", i),
+			expected: true,
+		})
+	}
+	for i := 0; i <= MaxScriptElementSize; i++ {
+		tests = append(tests, pushOnlyTest{
+			name:     fmt.Sprintf("canonical push of %d bytes of data", i),
+			script:   fmt.Sprintf("'a'{%d}", i),
+			expected: true,
+		})
 	}
 
-	if txscript.IsPushOnlyScript(test.script) != test.expected {
-		t.Errorf("IsPushOnlyScript (%s) wrong result\ngot: %v\nwant: "+
-			"%v", test.name, true, test.expected)
-	}
-}
-
-// TestCalcSignatureHash does some rudimentary testing of msg hash calculation.
-func TestCalcSignatureHash(t *testing.T) {
-	tx := new(wire.MsgTx)
-	tx.SerType = wire.TxSerializeFull
-	tx.Version = 1
-	for i := 0; i < 3; i++ {
-		txIn := new(wire.TxIn)
-		txIn.Sequence = 0xFFFFFFFF
-		txIn.PreviousOutPoint.Hash = chainhash.HashH([]byte{byte(i)})
-		txIn.PreviousOutPoint.Index = uint32(i)
-		txIn.PreviousOutPoint.Tree = int8(0)
-		tx.AddTxIn(txIn)
-	}
-	for i := 0; i < 2; i++ {
-		txOut := new(wire.TxOut)
-		txOut.PkScript = []byte{0x01, 0x01, 0x02, 0x03}
-		txOut.Value = 0x0000FF00FF00FF00
-		tx.AddTxOut(txOut)
-	}
-
-	want, _ := hex.DecodeString("d09285b6f60c71329323bc2e76c48" +
-		"a462cde4e1032aa8f59c55823f1722c7f4a")
-	pops, _ := txscript.TstParseScript([]byte{0x01, 0x01, 0x02, 0x03})
-
-	// Test prefix caching.
-	msg1, err := txscript.CalcSignatureHash(pops, txscript.SigHashAll, tx, 0, nil)
-	if err != nil {
-		t.Fatalf("unexpected error %v", err.Error())
-	}
-
-	prefixHash := tx.TxHash()
-	msg2, err := txscript.CalcSignatureHash(pops, txscript.SigHashAll, tx, 0,
-		&prefixHash)
-	if err != nil {
-		t.Fatalf("unexpected error %v", err.Error())
-	}
-
-	if !bytes.Equal(msg1, want) {
-		t.Errorf("for sighash all sig noncached wrong msg %x given, want %x",
-			msg1,
-			want)
-	}
-	if !bytes.Equal(msg2, want) {
-		t.Errorf("for sighash all sig cached wrong msg %x given, want %x",
-			msg1,
-			want)
-	}
-	if !bytes.Equal(msg1, msg2) {
-		t.Errorf("for sighash all sig non-equivalent msgs %x and %x were "+
-			"returned when using a cached prefix",
-			msg1,
-			msg2)
-	}
-
-	// Move the index and make sure that we get a whole new hash, despite
-	// using the same TxOuts.
-	msg3, err := txscript.CalcSignatureHash(pops, txscript.SigHashAll, tx, 1,
-		&prefixHash)
-	if err != nil {
-		t.Fatalf("unexpected error %v", err.Error())
-	}
-
-	if bytes.Equal(msg1, msg3) {
-		t.Errorf("for sighash all sig equivalent msgs %x and %x were "+
-			"returned when using a cached prefix but different indices",
-			msg1,
-			msg3)
+	for _, test := range tests {
+		script := mustParseShortFormV0(test.script)
+		result := IsPushOnlyScript(script)
+		if result != test.expected {
+			t.Errorf("%s: wrong result -- got: %v, want: %v", test.name, result,
+				test.expected)
+		}
 	}
 }
 
@@ -587,40 +639,96 @@ func TestIsUnspendable(t *testing.T) {
 	tests := []struct {
 		name     string
 		amount   int64
-		pkScript []byte
+		pkScript string
 		expected bool
-	}{
-		{
-			// Unspendable
-			amount:   100,
-			pkScript: []byte{0x6a, 0x04, 0x74, 0x65, 0x73, 0x74},
-			expected: true,
-		},
-		{
-			// Unspendable
-			amount: 0,
-			pkScript: []byte{0x76, 0xa9, 0x14, 0x29, 0x95, 0xa0,
-				0xfe, 0x68, 0x43, 0xfa, 0x9b, 0x95, 0x45,
-				0x97, 0xf0, 0xdc, 0xa7, 0xa4, 0x4d, 0xf6,
-				0xfa, 0x0b, 0x5c, 0x88, 0xac},
-			expected: true,
-		},
-		{
-			// Spendable
-			amount: 100,
-			pkScript: []byte{0x76, 0xa9, 0x14, 0x29, 0x95, 0xa0,
-				0xfe, 0x68, 0x43, 0xfa, 0x9b, 0x95, 0x45,
-				0x97, 0xf0, 0xdc, 0xa7, 0xa4, 0x4d, 0xf6,
-				0xfa, 0x0b, 0x5c, 0x88, 0xac},
-			expected: false,
-		},
-	}
+	}{{
+		name:     "unspendable due to being provably pruneable",
+		amount:   100,
+		pkScript: "RETURN DATA_4 0x74657374",
+		expected: true,
+	}, {
+		name:   "unspendable due to zero amount",
+		amount: 0,
+		pkScript: "DUP HASH160 DATA_20 0x2995a0fe6843fa9b954597f0dca7a44df6fa" +
+			"0b5c EQUALVERIFY CHECKSIG",
+		expected: true,
+	}, {
+		name:   "spendable",
+		amount: 100,
+		pkScript: "DUP HASH160 DATA_20 0x2995a0fe6843fa9b954597f0dca7a44df6fa" +
+			"0b5c EQUALVERIFY CHECKSIG",
+		expected: false,
+	}}
 
-	for i, test := range tests {
-		res := txscript.IsUnspendable(test.amount, test.pkScript)
-		if res != test.expected {
-			t.Errorf("TestIsUnspendable #%d failed: got %v want %v",
-				i, res, test.expected)
+	for _, test := range tests {
+		pkScript := mustParseShortFormV0(test.pkScript)
+		result := IsUnspendable(test.amount, pkScript)
+		if result != test.expected {
+			t.Errorf("%s: unexpected result -- got %v, want %v", test.name,
+				result, test.expected)
+			continue
+		}
+	}
+}
+
+// TestGenerateSSGenBlockRef ensures the block reference script for use in stake
+// vote transactions is generated correctly for various block hashes and
+// heights.
+func TestGenerateSSGenBlockRef(t *testing.T) {
+	var tests = []struct {
+		blockHash string
+		height    uint32
+		expected  []byte
+	}{{
+		"0000000000004740ad140c86753f9295e09f9cc81b1bb75d7f5552aeeedb7012",
+		1000,
+		hexToBytes("6a241270dbeeae52557f5db71b1bc89c9fe095923f75860c14ad40470" +
+			"00000000000e8030000"),
+	}, {
+		"000000000000000033eafc268a67c8d1f02343d7a96cf3fe2a4915ef779b52f9",
+		290000,
+		hexToBytes("6a24f9529b77ef15492afef36ca9d74323f0d1c8678a26fcea3300000" +
+			"00000000000d06c0400"),
+	}}
+
+	for _, test := range tests {
+		h, err := chainhash.NewHashFromStr(test.blockHash)
+		if err != nil {
+			t.Errorf("unexpected err: %v", err)
+			continue
+		}
+		s, err := GenerateSSGenBlockRef(*h, test.height)
+		if err != nil {
+			t.Errorf("unexpected err: %v", err)
+			continue
+		}
+		if !bytes.Equal(s, test.expected) {
+			t.Errorf("unexpected script -- got %x, want %x", s, test.expected)
+			continue
+		}
+	}
+}
+
+// TestGenerateSSGenVotes ensures the expected vote script for use in stake
+// vote transactions is generated correctly for various vote bits.
+func TestGenerateSSGenVotes(t *testing.T) {
+	var tests = []struct {
+		votebits uint16
+		expected []byte
+	}{
+		{65535, hexToBytes("6a02ffff")},
+		{256, hexToBytes("6a020001")},
+		{127, hexToBytes("6a027f00")},
+		{0, hexToBytes("6a020000")},
+	}
+	for _, test := range tests {
+		s, err := GenerateSSGenVotes(test.votebits)
+		if err != nil {
+			t.Errorf("unexpected err: %v", err)
+			continue
+		}
+		if !bytes.Equal(s, test.expected) {
+			t.Errorf("unexpected script -- got %x, want %x", s, test.expected)
 			continue
 		}
 	}

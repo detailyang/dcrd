@@ -1,15 +1,15 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package addrmgr_test
+package addrmgr
 
 import (
 	"net"
 	"testing"
+	"time"
 
-	"github.com/decred/dcrd/addrmgr"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -17,7 +17,7 @@ import (
 // address based on RFCs work as intended.
 func TestIPTypes(t *testing.T) {
 	type ipTest struct {
-		in       wire.NetAddress
+		ip       net.IP
 		rfc1918  bool
 		rfc2544  bool
 		rfc3849  bool
@@ -31,6 +31,7 @@ func TestIPTypes(t *testing.T) {
 		rfc6052  bool
 		rfc6145  bool
 		rfc6598  bool
+		rfc7343  bool
 		local    bool
 		valid    bool
 		routable bool
@@ -38,107 +39,113 @@ func TestIPTypes(t *testing.T) {
 
 	newIPTest := func(ip string, rfc1918, rfc2544, rfc3849, rfc3927, rfc3964,
 		rfc4193, rfc4380, rfc4843, rfc4862, rfc5737, rfc6052, rfc6145, rfc6598,
-		local, valid, routable bool) ipTest {
+		rfc7343, local, valid, routable bool) ipTest {
 		nip := net.ParseIP(ip)
-		na := *wire.NewNetAddressIPPort(nip, 8333, wire.SFNodeNetwork)
-		test := ipTest{na, rfc1918, rfc2544, rfc3849, rfc3927, rfc3964, rfc4193, rfc4380,
-			rfc4843, rfc4862, rfc5737, rfc6052, rfc6145, rfc6598, local, valid, routable}
+		test := ipTest{nip, rfc1918, rfc2544, rfc3849, rfc3927, rfc3964,
+			rfc4193, rfc4380, rfc4843, rfc4862, rfc5737, rfc6052, rfc6145,
+			rfc6598, rfc7343, local, valid, routable}
 		return test
 	}
 
 	tests := []ipTest{
 		newIPTest("10.255.255.255", true, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, false, true, false),
 		newIPTest("192.168.0.1", true, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, false, true, false),
 		newIPTest("172.31.255.1", true, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, false, true, false),
 		newIPTest("172.32.1.1", false, false, false, false, false, false, false, false,
-			false, false, false, false, false, false, true, true),
+			false, false, false, false, false, false, false, true, true),
 		newIPTest("169.254.250.120", false, false, false, true, false, false,
-			false, false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, false, true, false),
 		newIPTest("0.0.0.0", false, false, false, false, false, false, false,
-			false, false, false, false, false, false, true, false, false),
+			false, false, false, false, false, false, false, true, false, false),
 		newIPTest("255.255.255.255", false, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, false, false),
+			false, false, false, false, false, false, false, false, false, false, false),
 		newIPTest("127.0.0.1", false, false, false, false, false, false,
-			false, false, false, false, false, false, false, true, true, false),
+			false, false, false, false, false, false, false, false, true, true, false),
 		newIPTest("fd00:dead::1", false, false, false, false, false, true,
-			false, false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, false, true, false),
 		newIPTest("2001::1", false, false, false, false, false, false,
-			true, false, false, false, false, false, false, false, true, true),
+			true, false, false, false, false, false, false, false, false, true, true),
 		newIPTest("2001:10:abcd::1:1", false, false, false, false, false, false,
-			false, true, false, false, false, false, false, false, true, false),
+			false, true, false, false, false, false, false, false, false, true, false),
+		newIPTest("2001:20:abcd::1:1", false, false, false, false, false, false,
+			false, false, false, false, false, false, false, true, false, true, false),
 		newIPTest("fe80::1", false, false, false, false, false, false,
-			false, false, true, false, false, false, false, false, true, false),
+			false, false, true, false, false, false, false, false, false, true, false),
 		newIPTest("fe80:1::1", false, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, true, true),
+			false, false, false, false, false, false, false, false, false, true, true),
 		newIPTest("64:ff9b::1", false, false, false, false, false, false,
-			false, false, false, false, true, false, false, false, true, true),
+			false, false, false, false, true, false, false, false, false, true, true),
 		newIPTest("::ffff:abcd:ef12:1", false, false, false, false, false, false,
-			false, false, false, false, false, false, false, false, true, true),
+			false, false, false, false, false, false, false, false, false, true, true),
 		newIPTest("::1", false, false, false, false, false, false, false, false,
-			false, false, false, false, false, true, true, false),
+			false, false, false, false, false, false, true, true, false),
 		newIPTest("198.18.0.1", false, true, false, false, false, false, false,
-			false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, true, false),
 		newIPTest("100.127.255.1", false, false, false, false, false, false, false,
-			false, false, false, false, false, true, false, true, false),
+			false, false, false, false, false, true, false, false, true, false),
 		newIPTest("203.0.113.1", false, false, false, false, false, false, false,
-			false, false, false, false, false, false, false, true, false),
+			false, false, false, false, false, false, false, false, true, false),
 	}
 
 	t.Logf("Running %d tests", len(tests))
 	for _, test := range tests {
-		if rv := addrmgr.IsRFC1918(&test.in); rv != test.rfc1918 {
-			t.Errorf("IsRFC1918 %s\n got: %v want: %v", test.in.IP, rv, test.rfc1918)
+		if rv := isRFC1918(test.ip); rv != test.rfc1918 {
+			t.Errorf("isRFC1918 %s\n got: %v want: %v", test.ip, rv, test.rfc1918)
 		}
 
-		if rv := addrmgr.IsRFC3849(&test.in); rv != test.rfc3849 {
-			t.Errorf("IsRFC3849 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3849)
+		if rv := isRFC3849(test.ip); rv != test.rfc3849 {
+			t.Errorf("isRFC3849 %s\n got: %v want: %v", test.ip, rv, test.rfc3849)
 		}
 
-		if rv := addrmgr.IsRFC3927(&test.in); rv != test.rfc3927 {
-			t.Errorf("IsRFC3927 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3927)
+		if rv := isRFC3927(test.ip); rv != test.rfc3927 {
+			t.Errorf("isRFC3927 %s\n got: %v want: %v", test.ip, rv, test.rfc3927)
 		}
 
-		if rv := addrmgr.IsRFC3964(&test.in); rv != test.rfc3964 {
-			t.Errorf("IsRFC3964 %s\n got: %v want: %v", test.in.IP, rv, test.rfc3964)
+		if rv := isRFC3964(test.ip); rv != test.rfc3964 {
+			t.Errorf("isRFC3964 %s\n got: %v want: %v", test.ip, rv, test.rfc3964)
 		}
 
-		if rv := addrmgr.IsRFC4193(&test.in); rv != test.rfc4193 {
-			t.Errorf("IsRFC4193 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4193)
+		if rv := isRFC4193(test.ip); rv != test.rfc4193 {
+			t.Errorf("isRFC4193 %s\n got: %v want: %v", test.ip, rv, test.rfc4193)
 		}
 
-		if rv := addrmgr.IsRFC4380(&test.in); rv != test.rfc4380 {
-			t.Errorf("IsRFC4380 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4380)
+		if rv := isRFC4380(test.ip); rv != test.rfc4380 {
+			t.Errorf("isRFC4380 %s\n got: %v want: %v", test.ip, rv, test.rfc4380)
 		}
 
-		if rv := addrmgr.IsRFC4843(&test.in); rv != test.rfc4843 {
-			t.Errorf("IsRFC4843 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4843)
+		if rv := isRFC4843(test.ip); rv != test.rfc4843 {
+			t.Errorf("isRFC4843 %s\n got: %v want: %v", test.ip, rv, test.rfc4843)
 		}
 
-		if rv := addrmgr.IsRFC4862(&test.in); rv != test.rfc4862 {
-			t.Errorf("IsRFC4862 %s\n got: %v want: %v", test.in.IP, rv, test.rfc4862)
+		if rv := isRFC4862(test.ip); rv != test.rfc4862 {
+			t.Errorf("isRFC4862 %s\n got: %v want: %v", test.ip, rv, test.rfc4862)
 		}
 
-		if rv := addrmgr.IsRFC6052(&test.in); rv != test.rfc6052 {
-			t.Errorf("isRFC6052 %s\n got: %v want: %v", test.in.IP, rv, test.rfc6052)
+		if rv := isRFC6052(test.ip); rv != test.rfc6052 {
+			t.Errorf("isRFC6052 %s\n got: %v want: %v", test.ip, rv, test.rfc6052)
 		}
 
-		if rv := addrmgr.IsRFC6145(&test.in); rv != test.rfc6145 {
-			t.Errorf("IsRFC1918 %s\n got: %v want: %v", test.in.IP, rv, test.rfc6145)
+		if rv := isRFC6145(test.ip); rv != test.rfc6145 {
+			t.Errorf("isRFC6145 %s\n got: %v want: %v", test.ip, rv, test.rfc6145)
 		}
 
-		if rv := addrmgr.IsLocal(&test.in); rv != test.local {
-			t.Errorf("IsLocal %s\n got: %v want: %v", test.in.IP, rv, test.local)
+		if rv := isRFC7343(test.ip); rv != test.rfc7343 {
+			t.Errorf("isRFC7343 %s\n got: %v want: %v", test.ip, rv, test.rfc7343)
 		}
 
-		if rv := addrmgr.IsValid(&test.in); rv != test.valid {
-			t.Errorf("IsValid %s\n got: %v want: %v", test.in.IP, rv, test.valid)
+		if rv := isLocal(test.ip); rv != test.local {
+			t.Errorf("isLocal %s\n got: %v want: %v", test.ip, rv, test.local)
 		}
 
-		if rv := addrmgr.IsRoutable(&test.in); rv != test.routable {
-			t.Errorf("IsRoutable %s\n got: %v want: %v", test.in.IP, rv, test.routable)
+		if rv := isValid(test.ip); rv != test.valid {
+			t.Errorf("IsValid %s\n got: %v want: %v", test.ip, rv, test.valid)
+		}
+
+		if rv := IsRoutable(test.ip); rv != test.routable {
+			t.Errorf("IsRoutable %s\n got: %v want: %v", test.ip, rv, test.routable)
 		}
 	}
 }
@@ -148,56 +155,64 @@ func TestIPTypes(t *testing.T) {
 func TestGroupKey(t *testing.T) {
 	tests := []struct {
 		name     string
-		ip       string
+		host     string
 		expected string
 	}{
 		// Local addresses.
-		{name: "ipv4 localhost", ip: "127.0.0.1", expected: "local"},
-		{name: "ipv6 localhost", ip: "::1", expected: "local"},
-		{name: "ipv4 zero", ip: "0.0.0.0", expected: "local"},
-		{name: "ipv4 first octet zero", ip: "0.1.2.3", expected: "local"},
+		{name: "ipv4 localhost", host: "127.0.0.1", expected: "local"},
+		{name: "ipv6 localhost", host: "::1", expected: "local"},
+		{name: "ipv4 zero", host: "0.0.0.0", expected: "local"},
+		{name: "ipv4 first octet zero", host: "0.1.2.3", expected: "local"},
 
 		// Unroutable addresses.
-		{name: "ipv4 invalid bcast", ip: "255.255.255.255", expected: "unroutable"},
-		{name: "ipv4 rfc1918 10/8", ip: "10.1.2.3", expected: "unroutable"},
-		{name: "ipv4 rfc1918 172.16/12", ip: "172.16.1.2", expected: "unroutable"},
-		{name: "ipv4 rfc1918 192.168/16", ip: "192.168.1.2", expected: "unroutable"},
-		{name: "ipv6 rfc3849 2001:db8::/32", ip: "2001:db8::1234", expected: "unroutable"},
-		{name: "ipv4 rfc3927 169.254/16", ip: "169.254.1.2", expected: "unroutable"},
-		{name: "ipv6 rfc4193 fc00::/7", ip: "fc00::1234", expected: "unroutable"},
-		{name: "ipv6 rfc4843 2001:10::/28", ip: "2001:10::1234", expected: "unroutable"},
-		{name: "ipv6 rfc4862 fe80::/64", ip: "fe80::1234", expected: "unroutable"},
+		{name: "ipv4 invalid bcast", host: "255.255.255.255", expected: "unroutable"},
+		{name: "ipv4 rfc1918 10/8", host: "10.1.2.3", expected: "unroutable"},
+		{name: "ipv4 rfc1918 172.16/12", host: "172.16.1.2", expected: "unroutable"},
+		{name: "ipv4 rfc1918 192.168/16", host: "192.168.1.2", expected: "unroutable"},
+		{name: "ipv6 rfc3849 2001:db8::/32", host: "2001:db8::1234", expected: "unroutable"},
+		{name: "ipv6 rfc7343 2001:20::/28", host: "2001:20::1234", expected: "unroutable"},
+		{name: "ipv4 rfc3927 169.254/16", host: "169.254.1.2", expected: "unroutable"},
+		{name: "ipv6 rfc4193 fc00::/7", host: "fc00::1234", expected: "unroutable"},
+		{name: "ipv6 rfc4843 2001:10::/28", host: "2001:10::1234", expected: "unroutable"},
+		{name: "ipv6 rfc4862 fe80::/64", host: "fe80::1234", expected: "unroutable"},
 
 		// IPv4 normal.
-		{name: "ipv4 normal class a", ip: "12.1.2.3", expected: "12.1.0.0"},
-		{name: "ipv4 normal class b", ip: "173.1.2.3", expected: "173.1.0.0"},
-		{name: "ipv4 normal class c", ip: "196.1.2.3", expected: "196.1.0.0"},
+		{name: "ipv4 normal class a", host: "12.1.2.3", expected: "12.1.0.0"},
+		{name: "ipv4 normal class b", host: "173.1.2.3", expected: "173.1.0.0"},
+		{name: "ipv4 normal class c", host: "196.1.2.3", expected: "196.1.0.0"},
 
 		// IPv6/IPv4 translations.
-		{name: "ipv6 rfc3964 with ipv4 encap", ip: "2002:0c01:0203::", expected: "12.1.0.0"},
-		{name: "ipv6 rfc4380 toredo ipv4", ip: "2001:0:1234::f3fe:fdfc", expected: "12.1.0.0"},
-		{name: "ipv6 rfc6052 well-known prefix with ipv4", ip: "64:ff9b::0c01:0203", expected: "12.1.0.0"},
-		{name: "ipv6 rfc6145 translated ipv4", ip: "::ffff:0:0c01:0203", expected: "12.1.0.0"},
-
-		// Tor.
-		{name: "ipv6 tor onioncat", ip: "fd87:d87e:eb43:1234::5678", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 2", ip: "fd87:d87e:eb43:1245::6789", expected: "tor:2"},
-		{name: "ipv6 tor onioncat 3", ip: "fd87:d87e:eb43:1345::6789", expected: "tor:3"},
+		{name: "ipv6 rfc3964 with ipv4 encap", host: "2002:0c01:0203::", expected: "12.1.0.0"},
+		{name: "ipv6 rfc4380 toredo ipv4", host: "2001:0:1234::f3fe:fdfc", expected: "12.1.0.0"},
+		{name: "ipv6 rfc6052 well-known prefix with ipv4", host: "64:ff9b::0c01:0203", expected: "12.1.0.0"},
+		{name: "ipv6 rfc6145 translated ipv4", host: "::ffff:0:0c01:0203", expected: "12.1.0.0"},
 
 		// IPv6 normal.
-		{name: "ipv6 normal", ip: "2602:100::1", expected: "2602:100::"},
-		{name: "ipv6 normal 2", ip: "2602:0100::1234", expected: "2602:100::"},
-		{name: "ipv6 hurricane electric", ip: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
-		{name: "ipv6 hurricane electric 2", ip: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
+		{name: "ipv6 normal", host: "2602:100::1", expected: "2602:100::"},
+		{name: "ipv6 normal 2", host: "2602:0100::1234", expected: "2602:100::"},
+		{name: "ipv6 hurricane electric", host: "2001:470:1f10:a1::2", expected: "2001:470:1000::"},
+		{name: "ipv6 hurricane electric 2", host: "2001:0470:1f10:a1::2", expected: "2001:470:1000::"},
+
+		// TorV3
+		{
+			name:     "torv3",
+			host:     "xa4r2iadxm55fbnqgwwi5mymqdcofiu3w6rpbtqn7b2dyn7mgwj64jyd.onion",
+			expected: "torv3:8",
+		},
 	}
 
-	for i, test := range tests {
-		nip := net.ParseIP(test.ip)
-		na := *wire.NewNetAddressIPPort(nip, 8333, wire.SFNodeNetwork)
-		if key := addrmgr.GroupKey(&na); key != test.expected {
-			t.Errorf("TestGroupKey #%d (%s): unexpected group key "+
-				"- got '%s', want '%s'", i, test.name,
-				key, test.expected)
+	ts := time.Now()
+	for _, test := range tests {
+		addrType, addrBytes := EncodeHost(test.host)
+		na, err := NewNetAddressFromParams(addrType, addrBytes, 8333, ts,
+			wire.SFNodeNetwork)
+		if err != nil {
+			t.Fatalf("%q: failed to create NetAddress: %v", test.name, err)
+		}
+		actualKey := na.GroupKey()
+		if actualKey != test.expected {
+			t.Errorf("%q: unexpected group key - got %s, want %s",
+				test.name, actualKey, test.expected)
 		}
 	}
 }

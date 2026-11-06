@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,16 +7,14 @@ package ffldb_test
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/database/ffldb"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/dcrd/database/v3/ffldb"
+	"github.com/decred/dcrd/dcrutil/v4"
 )
 
 // dbType is the database type name for this driver.
@@ -29,9 +27,9 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure that attempting to open a database that doesn't exist returns
 	// the expected error.
-	wantErrCode := database.ErrDbDoesNotExist
+	wantErrKind := database.ErrDbDoesNotExist
 	_, err := database.Open(dbType, "noexist", blockDataNet)
-	if !checkDbError(t, "Open", err, wantErrCode) {
+	if !checkDbError(t, "Open", err, wantErrKind) {
 		return
 	}
 
@@ -103,47 +101,45 @@ func TestCreateOpenFail(t *testing.T) {
 
 	// Ensure operations against a closed database return the expected
 	// error.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-createfail")
-	_ = os.RemoveAll(dbPath)
+	dbPath := t.TempDir()
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
 		t.Errorf("Create: unexpected error: %v", err)
 		return
 	}
-	defer os.RemoveAll(dbPath)
 	db.Close()
 
-	wantErrCode = database.ErrDbNotOpen
+	wantErrKind = database.ErrDbNotOpen
 	err = db.View(func(tx database.Tx) error {
 		return nil
 	})
-	if !checkDbError(t, "View", err, wantErrCode) {
+	if !checkDbError(t, "View", err, wantErrKind) {
 		return
 	}
 
-	wantErrCode = database.ErrDbNotOpen
+	wantErrKind = database.ErrDbNotOpen
 	err = db.Update(func(tx database.Tx) error {
 		return nil
 	})
-	if !checkDbError(t, "Update", err, wantErrCode) {
+	if !checkDbError(t, "Update", err, wantErrKind) {
 		return
 	}
 
-	wantErrCode = database.ErrDbNotOpen
+	wantErrKind = database.ErrDbNotOpen
 	_, err = db.Begin(false)
-	if !checkDbError(t, "Begin(false)", err, wantErrCode) {
+	if !checkDbError(t, "Begin(false)", err, wantErrKind) {
 		return
 	}
 
-	wantErrCode = database.ErrDbNotOpen
+	wantErrKind = database.ErrDbNotOpen
 	_, err = db.Begin(true)
-	if !checkDbError(t, "Begin(true)", err, wantErrCode) {
+	if !checkDbError(t, "Begin(true)", err, wantErrKind) {
 		return
 	}
 
-	wantErrCode = database.ErrDbNotOpen
+	wantErrKind = database.ErrDbNotOpen
 	err = db.Close()
-	if !checkDbError(t, "Close", err, wantErrCode) {
+	if !checkDbError(t, "Close", err, wantErrKind) {
 		return
 	}
 }
@@ -154,15 +150,15 @@ func TestPersistence(t *testing.T) {
 	t.Parallel()
 
 	// Create a new database to run tests against.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-persistencetest")
-	_ = os.RemoveAll(dbPath)
+	dbPath := t.TempDir()
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
 		t.Errorf("Failed to create test database (%s) %v", dbType, err)
 		return
 	}
-	defer os.RemoveAll(dbPath)
-	defer db.Close()
+	t.Cleanup(func() {
+		db.Close()
+	})
 
 	// Create a bucket, put some values into it, and store a block so they
 	// can be tested for existence on re-open.
@@ -172,8 +168,9 @@ func TestPersistence(t *testing.T) {
 		"b1key2": "foo2",
 		"b1key3": "foo3",
 	}
-	genesisBlock := dcrutil.NewBlock(chaincfg.MainNetParams.GenesisBlock)
-	genesisHash := chaincfg.MainNetParams.GenesisHash
+	mainNetParams := chaincfg.MainNetParams()
+	genesisBlock := dcrutil.NewBlock(mainNetParams.GenesisBlock)
+	genesisHash := &mainNetParams.GenesisHash
 	err = db.Update(func(tx database.Tx) error {
 		metadataBucket := tx.Metadata()
 		if metadataBucket == nil {
@@ -182,20 +179,20 @@ func TestPersistence(t *testing.T) {
 
 		bucket1, err := metadataBucket.CreateBucket(bucket1Key)
 		if err != nil {
-			return fmt.Errorf("CreateBucket: unexpected error: %v",
+			return fmt.Errorf("CreateBucket: unexpected error: %w",
 				err)
 		}
 
 		for k, v := range storeValues {
 			err := bucket1.Put([]byte(k), []byte(v))
 			if err != nil {
-				return fmt.Errorf("Put: unexpected error: %v",
+				return fmt.Errorf("Put: unexpected error: %w",
 					err)
 			}
 		}
 
 		if err := tx.StoreBlock(genesisBlock); err != nil {
-			return fmt.Errorf("StoreBlock: unexpected error: %v",
+			return fmt.Errorf("StoreBlock: unexpected error: %w",
 				err)
 		}
 
@@ -240,7 +237,7 @@ func TestPersistence(t *testing.T) {
 		genesisBlockBytes, _ := genesisBlock.Bytes()
 		gotBytes, err := tx.FetchBlock(genesisHash)
 		if err != nil {
-			return fmt.Errorf("FetchBlock: unexpected error: %v",
+			return fmt.Errorf("FetchBlock: unexpected error: %w",
 				err)
 		}
 		if !reflect.DeepEqual(gotBytes, genesisBlockBytes) {
@@ -260,20 +257,20 @@ func TestInterface(t *testing.T) {
 	t.Parallel()
 
 	// Create a new database to run tests against.
-	dbPath := filepath.Join(os.TempDir(), "ffldb-interfacetest")
-	_ = os.RemoveAll(dbPath)
+	dbPath := t.TempDir()
 	db, err := database.Create(dbType, dbPath, blockDataNet)
 	if err != nil {
 		t.Errorf("failed to create test database (%s) %v", dbType, err)
 		return
 	}
-	defer os.RemoveAll(dbPath)
-	defer db.Close()
+	t.Cleanup(func() {
+		db.Close()
+	})
 
 	// Ensure the driver type is the expected value.
 	gotDbType := db.Type()
 	if gotDbType != dbType {
-		t.Errorf("Type: unepxected driver type - got %v, want %v",
+		t.Errorf("Type: unexpected driver type - got %v, want %v",
 			gotDbType, dbType)
 		return
 	}

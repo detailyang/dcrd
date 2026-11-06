@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2021 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,7 +30,7 @@ var outgoingPipeMessages = make(chan pipeMessage)
 
 // serviceControlPipeRx reads from the file descriptor fd of a read end pipe.
 // This is intended to be used as a simple control mechanism for parent
-// processes to communicate with and and manage the lifetime of a dcrd child
+// processes to communicate with and manage the lifetime of a dcrd child
 // process using a unidirectional pipe (on Windows, this is an anonymous pipe,
 // not a named pipe).
 //
@@ -45,8 +46,7 @@ func serviceControlPipeRx(fd uintptr) {
 	r := bufio.NewReader(pipe)
 	for {
 		_, err := r.Discard(1024)
-		if err == io.EOF {
-			err = nil
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -122,28 +122,25 @@ func drainOutgoingPipeMessages() {
 // second byte, when applicable, describes which event or service is about to
 // start or stop.
 //
-//   0 <event id>:  The startup event is about to run
-//   1 <ignored>:   All startup tasks have completed
-//   2 <event id>:  The shutdown event is about to run
+//	0 <event id>:  The startup event is about to run
+//	1 <ignored>:   All startup tasks have completed
+//	2 <event id>:  The shutdown event is about to run
 //
 // Event IDs can take on the following values:
 //
-//   0: Database opening/closing
-//   1: Ticket database opening/closing
-//   2: Peer-to-peer server starting/stopping
+//	0: Database opening/closing
+//	1: Peer-to-peer server starting/stopping
 //
 // Note that not all subsystems are started/stopped or events run during the
 // program's lifetime depending on what features are enabled through the config.
 //
 // As an example, the following messages may be sent during a typical execution:
 //
-//   0 0: The database is being opened
-//   0 1: The ticket DB is being opened
-//   0 2: The P2P server is starting
-//   1 0: All startup tasks have completed
-//   2 2: The P2P server is stopping
-//   2 1: The ticket DB is being closed and written to disk
-//   2 0: The database is being closed
+//	0 0: The database is being opened
+//	0 1: The P2P server is starting
+//	1 0: All startup tasks have completed
+//	2 1: The P2P server is stopping
+//	2 0: The database is being closed
 type lifetimeEvent struct {
 	event  lifetimeEventID
 	action lifetimeAction
@@ -207,4 +204,60 @@ func (s lifetimeEventServer) notifyShutdownEvent(action lifetimeAction) {
 		event:  shutdownEvent,
 		action: action,
 	}
+}
+
+// boundP2PListenAddrEvent are IPC events emitted by dcrd with the bound local
+// addresses for the P2P interface.  Multiple events of this type may be
+// generated.
+//
+// The type of this event is "p2plistenaddr" and the payload is the UTF-8
+// encoded address.
+type boundP2PListenAddrEvent string
+
+func (e boundP2PListenAddrEvent) Type() string        { return "p2plistenaddr" }
+func (e boundP2PListenAddrEvent) PayloadSize() uint32 { return uint32(len(e)) }
+func (e boundP2PListenAddrEvent) WritePayload(w io.Writer) error {
+	_, err := w.Write([]byte(e))
+	return err
+}
+
+// boundRPCListenAddrEvent are IPC events emitted by dcrd with the bound local
+// addresses for the RPC interface.  Multiple events of this type may be
+// generated.
+//
+// The type of this event is "rpclistenaddr" and the payload is the UTF-8
+// encoded address.
+type boundRPCListenAddrEvent string
+
+func (e boundRPCListenAddrEvent) Type() string        { return "rpclistenaddr" }
+func (e boundRPCListenAddrEvent) PayloadSize() uint32 { return uint32(len(e)) }
+func (e boundRPCListenAddrEvent) WritePayload(w io.Writer) error {
+	_, err := w.Write([]byte(e))
+	return err
+}
+
+// boundAddrEventServer is a server that can notify parent processes, via the
+// IPC mechanism, the local addresses to which specific subsystems are bound
+// during initialization.
+//
+// The empty value is a valid server and will not send any events if its
+// notify* methods are called.
+type boundAddrEventServer chan<- pipeMessage
+
+func newBoundAddrEventServer(outChan chan<- pipeMessage) boundAddrEventServer {
+	return boundAddrEventServer(outChan)
+}
+
+func (s boundAddrEventServer) notifyP2PAddress(addr string) {
+	if s == nil {
+		return
+	}
+	s <- boundP2PListenAddrEvent(addr)
+}
+
+func (s boundAddrEventServer) notifyRPCAddress(addr string) {
+	if s == nil {
+		return
+	}
+	s <- boundRPCListenAddrEvent(addr)
 }

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -10,7 +10,7 @@ import (
 	"io"
 )
 
-// MsgNotFound defines a decred notfound message which is sent in response to
+// MsgNotFound defines a Decred notfound message which is sent in response to
 // a getdata message if any of the requested data in not available on the peer.
 // Each message is limited to a maximum number of inventory vectors, which is
 // currently 50,000.
@@ -23,19 +23,21 @@ type MsgNotFound struct {
 
 // AddInvVect adds an inventory vector to the message.
 func (msg *MsgNotFound) AddInvVect(iv *InvVect) error {
+	const op = "MsgNotFound.AddInvVect"
 	if len(msg.InvList)+1 > MaxInvPerMsg {
-		str := fmt.Sprintf("too many invvect in message [max %v]",
+		msg := fmt.Sprintf("too many invvect in message [max %v]",
 			MaxInvPerMsg)
-		return messageError("MsgNotFound.AddInvVect", str)
+		return messageError(op, ErrTooManyVectors, msg)
 	}
 
 	msg.InvList = append(msg.InvList, iv)
 	return nil
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgNotFound) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgNotFound.BtcDecode"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err
@@ -43,8 +45,8 @@ func (msg *MsgNotFound) BtcDecode(r io.Reader, pver uint32) error {
 
 	// Limit to max inventory vectors per message.
 	if count > MaxInvPerMsg {
-		str := fmt.Sprintf("too many invvect in message [%v]", count)
-		return messageError("MsgNotFound.BtcDecode", str)
+		msg := fmt.Sprintf("too many invvect in message [%v]", count)
+		return messageError(op, ErrTooManyVectors, msg)
 	}
 
 	// Create a contiguous slice of inventory vectors to deserialize into in
@@ -63,14 +65,15 @@ func (msg *MsgNotFound) BtcDecode(r io.Reader, pver uint32) error {
 	return nil
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgNotFound) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgNotFound.BtcEncode"
 	// Limit to max inventory vectors per message.
 	count := len(msg.InvList)
 	if count > MaxInvPerMsg {
-		str := fmt.Sprintf("too many invvect in message [%v]", count)
-		return messageError("MsgNotFound.BtcEncode", str)
+		msg := fmt.Sprintf("too many invvect in message [%v]", count)
+		return messageError(op, ErrTooManyVectors, msg)
 	}
 
 	err := WriteVarInt(w, pver, uint64(count))
@@ -97,12 +100,21 @@ func (msg *MsgNotFound) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgNotFound) MaxPayloadLength(pver uint32) uint32 {
-	// Max var int 9 bytes + max InvVects at 36 bytes each.
-	// Num inventory vectors (varInt) + max allowed inventory vectors.
-	return MaxVarIntPayload + (MaxInvPerMsg * maxInvVectPayload)
+	// Num inventory vectors (varInt) 3 bytes + max allowed inventory vectors (
+	// 36 bytes each).
+	return uint32(VarIntSerializeSize(MaxInvPerMsg)) + (MaxInvPerMsg *
+		maxInvVectPayload)
 }
 
-// NewMsgNotFound returns a new decred notfound message that conforms to the
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgNotFound) SerializeSize() int {
+	// Num inventory vectors (varInt) + total size of the inventory vectors.
+	return VarIntSerializeSize(uint64(len(msg.InvList))) +
+		len(msg.InvList)*maxInvVectPayload
+}
+
+// NewMsgNotFound returns a new Decred notfound message that conforms to the
 // Message interface.  See MsgNotFound for details.
 func NewMsgNotFound() *MsgNotFound {
 	return &MsgNotFound{

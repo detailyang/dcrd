@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/crypto/blake256"
+	"lukechampine.com/blake3"
 )
 
-// MaxBlockHeaderPayload is the maximum number of bytes a block header can be.
+// MaxBlockHeaderPayload is the number of bytes a serialized block header is.
+// Every field is fixed width, so this is the exact size, not an upper bound.
 // Version 4 bytes + PrevBlock 32 bytes + MerkleRoot 32 bytes + StakeRoot 32
 // bytes + VoteBits 2 bytes + FinalState 6 bytes + Voters 2 bytes + FreshStake 1
 // byte + Revocations 1 bytes + PoolSize 4 bytes + Bits 4 bytes + SBits 8 bytes
@@ -87,16 +90,37 @@ type BlockHeader struct {
 // header.
 const blockHeaderLen = 180
 
-// BlockHash computes the block identifier hash for the given block header.
+// BlockHash computes the BLAKE-256 block identifier hash for the given block
+// header.
 func (h *BlockHeader) BlockHash() chainhash.Hash {
-	// Encode the header and hash256 everything prior to the number of
-	// transactions.  Ignore the error returns since there is no way the
-	// encode could fail except being out of memory which would cause a
-	// run-time panic.
-	buf := bytes.NewBuffer(make([]byte, 0, MaxBlockHeaderPayload))
-	_ = writeBlockHeader(buf, 0, h)
+	// Encode the header and hash everything prior to the number of
+	// transactions.  Ignore the error returns since there is no way the encode
+	// could fail except being out of memory which would cause a run-time panic.
+	hasher := blake256.NewHasher256()
+	_ = writeBlockHeader(hasher, 0, h)
+	return hasher.Sum256()
+}
 
-	return chainhash.HashH(buf.Bytes())
+// PowHashV1 calculates and returns the version 1 proof of work BLAKE-256 hash
+// for the block header.
+//
+// NOTE: This is the original proof of work hash function used at Decred launch
+// and applies to all blocks prior to the activation of DCP0011.
+func (h *BlockHeader) PowHashV1() chainhash.Hash {
+	return h.BlockHash()
+}
+
+// PowHashV2 calculates and returns the version 2 proof of work BLAKE3 hash as
+// defined in DCP0011 for the block header.
+func (h *BlockHeader) PowHashV2() chainhash.Hash {
+	// Encode the header and hash everything prior to the number of
+	// transactions.  Ignore the error returns since there is no way the encode
+	// could fail except being out of memory which would cause a run-time panic.
+	var digest chainhash.Hash
+	hasher := blake3.New(len(digest), nil)
+	_ = writeBlockHeader(hasher, 0, h)
+	hasher.Sum(digest[:0])
+	return digest
 }
 
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
@@ -185,7 +209,7 @@ func NewBlockHeader(version int32, prevHash *chainhash.Hash,
 	}
 }
 
-// readBlockHeader reads a decred block header from r.  See Deserialize for
+// readBlockHeader reads a Decred block header from r.  See Deserialize for
 // decoding block headers stored to disk, such as in a database, as opposed to
 // decoding from the wire.
 func readBlockHeader(r io.Reader, pver uint32, bh *BlockHeader) error {
@@ -196,14 +220,14 @@ func readBlockHeader(r io.Reader, pver uint32, bh *BlockHeader) error {
 		&bh.Nonce, &bh.ExtraData, &bh.StakeVersion)
 }
 
-// writeBlockHeader writes a decred block header to w.  See Serialize for
+// writeBlockHeader writes a Decred block header to w.  See Serialize for
 // encoding block headers to be stored to disk, such as in a database, as
 // opposed to encoding for the wire.
 func writeBlockHeader(w io.Writer, pver uint32, bh *BlockHeader) error {
 	sec := uint32(bh.Timestamp.Unix())
-	return writeElements(w, bh.Version, &bh.PrevBlock, &bh.MerkleRoot,
-		&bh.StakeRoot, bh.VoteBits, bh.FinalState, bh.Voters,
-		bh.FreshStake, bh.Revocations, bh.PoolSize, bh.Bits, bh.SBits,
-		bh.Height, bh.Size, sec, bh.Nonce, bh.ExtraData,
-		bh.StakeVersion)
+	return writeElements(w, &bh.Version, &bh.PrevBlock, &bh.MerkleRoot,
+		&bh.StakeRoot, &bh.VoteBits, &bh.FinalState, &bh.Voters,
+		&bh.FreshStake, &bh.Revocations, &bh.PoolSize, &bh.Bits, &bh.SBits,
+		&bh.Height, &bh.Size, &sec, &bh.Nonce, &bh.ExtraData,
+		&bh.StakeVersion)
 }

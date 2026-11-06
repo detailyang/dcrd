@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,8 +15,8 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/dcrd/dcrutil/v4"
 	"github.com/decred/dcrd/wire"
 )
 
@@ -70,7 +71,7 @@ func (bi *blockImporter) readBlock() ([]byte, error) {
 	var net uint32
 	err := binary.Read(bi.r, binary.LittleEndian, &net)
 	if err != nil {
-		if err != io.EOF {
+		if !errors.Is(err, io.EOF) {
 			return nil, err
 		}
 
@@ -170,8 +171,7 @@ out:
 		// notify the status handler with the error and bail.
 		serializedBlock, err := bi.readBlock()
 		if err != nil {
-			bi.errChan <- fmt.Errorf("error reading from input "+
-				"file: %v", err.Error())
+			bi.errChan <- fmt.Errorf("error reading from input file: %w", err)
 			break out
 		}
 
@@ -376,8 +376,7 @@ func (cmd *importCmd) Execute(args []string) error {
 		resultsChan := importer.Import()
 		results := <-resultsChan
 		if results.err != nil {
-			dbErr, ok := results.err.(database.Error)
-			if !ok || ok && dbErr.ErrorCode != database.ErrDbNotOpen {
+			if !errors.Is(results.err, database.ErrDbNotOpen) {
 				shutdownChannel <- results.err
 				return
 			}

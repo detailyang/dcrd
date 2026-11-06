@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -86,17 +87,15 @@ func TestVersion(t *testing.T) {
 	// accounting for ":", "/"
 	err = msg.AddUserAgent(strings.Repeat("t",
 		MaxUserAgentLen-len(customUserAgent)-2+1), "")
-	if _, ok := err.(*MessageError); !ok {
-		t.Errorf("AddUserAgent: expected error not received "+
-			"- got %v, want %T", err, MessageError{})
-
+	if !errors.Is(err, ErrUserAgentTooLong) {
+		t.Errorf("AddUserAgent: expected error not received - got %v, want %v",
+			err, ErrUserAgentTooLong)
 	}
 
 	// Version message should not have any services set by default.
 	if msg.Services != 0 {
 		t.Errorf("NewMsgVersion: wrong default services - got %v, want %v",
 			msg.Services, 0)
-
 	}
 	if msg.HasService(SFNodeNetwork) {
 		t.Errorf("HasService: SFNodeNetwork service is set")
@@ -120,6 +119,13 @@ func TestVersion(t *testing.T) {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Ensure adding the full service node flag works.
@@ -154,8 +160,8 @@ func TestVersion(t *testing.T) {
 		localAddr:  &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 8333},
 		remoteAddr: tcpAddrYou,
 	}
-	msg, err = NewMsgVersionFromConn(conn, nonce, lastBlock)
-	if err != ErrInvalidNetAddr {
+	_, err = NewMsgVersionFromConn(conn, nonce, lastBlock)
+	if !errors.Is(err, ErrInvalidNetAddr) {
 		t.Errorf("NewMsgVersionFromConn: expected error not received "+
 			"- got %v, want %v", err, ErrInvalidNetAddr)
 	}
@@ -165,13 +171,11 @@ func TestVersion(t *testing.T) {
 		localAddr:  tcpAddrMe,
 		remoteAddr: &net.UDPAddr{IP: net.ParseIP("192.168.0.1"), Port: 8333},
 	}
-	msg, err = NewMsgVersionFromConn(conn, nonce, lastBlock)
-	if err != ErrInvalidNetAddr {
+	_, err = NewMsgVersionFromConn(conn, nonce, lastBlock)
+	if !errors.Is(err, ErrInvalidNetAddr) {
 		t.Errorf("NewMsgVersionFromConn: expected error not received "+
 			"- got %v, want %v", err, ErrInvalidNetAddr)
 	}
-
-	return
 }
 
 // TestVersionWire tests the MsgVersion wire encode and decode for various
@@ -199,6 +203,12 @@ func TestVersionWire(t *testing.T) {
 			baseVersionBIP0037Encoded,
 			ProtocolVersion,
 		},
+		{
+			verRelayTxFalse,
+			verRelayTxFalse,
+			verRelayTxFalseEncoded,
+			ProtocolVersion,
+		},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -214,6 +224,14 @@ func TestVersionWire(t *testing.T) {
 			t.Errorf("BtcEncode #%d\n got: %s want: %s", i,
 				spew.Sdump(buf.Bytes()), spew.Sdump(test.buf))
 			continue
+		}
+
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.in.SerializeSize()
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
 		}
 
 		// Decode the message from wire format.
@@ -239,7 +257,6 @@ func TestVersionWireErrors(t *testing.T) {
 	// because the test data is using bytes encoded with that protocol
 	// version.
 	pver := uint32(60002)
-	wireErr := &MessageError{}
 
 	// Ensure calling MsgVersion.BtcDecode with a non *bytes.Buffer returns
 	// error.
@@ -264,7 +281,7 @@ func TestVersionWireErrors(t *testing.T) {
 
 	// Make a new buffer big enough to hold the base version plus the new
 	// bytes for the bigger varint to hold the new size of the user agent
-	// and the new user agent string.  Then stich it all together.
+	// and the new user agent string.  Then stitch it all together.
 	newLen := len(baseVersionEncoded) - len(baseVersion.UserAgent)
 	newLen = newLen + len(newUAVarIntBuf.Bytes()) - 1 + len(newUA)
 	exceedUAVerEncoded := make([]byte, newLen)
@@ -300,7 +317,7 @@ func TestVersionWireErrors(t *testing.T) {
 		// Force error in last block.
 		{baseVersion, baseVersionEncoded, pver, 98, io.ErrShortWrite, io.ErrUnexpectedEOF},
 		// Force error due to user agent too big
-		{exceedUAVer, exceedUAVerEncoded, pver, newLen, wireErr, wireErr},
+		{exceedUAVer, exceedUAVerEncoded, pver, newLen, ErrUserAgentTooLong, ErrUserAgentTooLong},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -308,40 +325,20 @@ func TestVersionWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.writeErr) {
-			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
-				i, err, test.writeErr)
+		if !errors.Is(err, test.writeErr) {
+			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v", i, err,
+				test.writeErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.writeErr {
-				t.Errorf("BtcEncode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.writeErr)
-				continue
-			}
 		}
 
 		// Decode from wire format.
 		var msg MsgVersion
 		buf := bytes.NewBuffer(test.buf[0:test.max])
 		err = msg.BtcDecode(buf, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, test.readErr)
+		if !errors.Is(err, test.readErr) {
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.readErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
-				t.Errorf("BtcDecode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.readErr)
-				continue
-			}
 		}
 	}
 }

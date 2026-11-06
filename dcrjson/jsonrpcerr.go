@@ -1,5 +1,5 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -40,6 +40,8 @@ const (
 	ErrRPCDatabase            RPCErrorCode = -20
 	ErrRPCDeserialization     RPCErrorCode = -22
 	ErrRPCVerify              RPCErrorCode = -25
+	ErrRPCInvalidState        RPCErrorCode = -26
+	ErrRPCCancel              RPCErrorCode = -27
 )
 
 // Peer-to-peer client errors.
@@ -48,7 +50,7 @@ const (
 	ErrRPCClientInInitialDownload RPCErrorCode = -10
 )
 
-// Wallet JSON errors
+// Wallet JSON errors.
 const (
 	ErrRPCWallet                    RPCErrorCode = -4
 	ErrRPCWalletInsufficientFunds   RPCErrorCode = -6
@@ -73,8 +75,13 @@ const (
 	ErrRPCNoTxInfo          RPCErrorCode = -5
 	ErrRPCNoNewestBlockInfo RPCErrorCode = -5
 	ErrRPCInvalidTxVout     RPCErrorCode = -5
+	ErrRPCNoTreasury        RPCErrorCode = -5
+	ErrRPCNoMixMsgInfo      RPCErrorCode = -5
 	ErrRPCRawTxString       RPCErrorCode = -32602
 	ErrRPCDecodeHexString   RPCErrorCode = -22
+	ErrRPCProfilerState     RPCErrorCode = -26
+	ErrRPCDuplicateTx       RPCErrorCode = -40
+	ErrRPCReconsiderFailure RPCErrorCode = -50
 )
 
 // Errors that are specific to btcd.

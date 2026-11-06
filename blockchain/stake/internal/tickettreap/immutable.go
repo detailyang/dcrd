@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -57,7 +57,7 @@ type Immutable struct {
 	root  *treapNode
 	count int
 
-	// totalSize is the best estimate of the total size of of all data in
+	// totalSize is the best estimate of the total size of all data in
 	// the treap including the keys, values, and node sizes.
 	totalSize uint64
 }
@@ -212,6 +212,8 @@ func (t *Immutable) Put(key Key, value *Value) *Immutable {
 		// Perform a right rotation if the node is on the left side or
 		// a left rotation if the node is on the right side.
 		if parent.left == node {
+			// nolint: dupword
+			//
 			// just to help visualise right-rotation...
 			//        p               n
 			//       / \       ->    / \
@@ -378,14 +380,14 @@ func (t *Immutable) ForEach(fn func(k Key, v *Value) bool) {
 		parents.Push(node)
 	}
 	for parents.Len() > 0 {
-		node := parents.Pop()
-		if !fn(node.key, node.value) {
+		pnode := parents.Pop()
+		if !fn(pnode.key, pnode.value) {
 			return
 		}
 
 		// Extend the nodes to traverse by all children to the left of
 		// the current node's right child.
-		for node := node.right; node != nil; node = node.left {
+		for node := pnode.right; node != nil; node = node.left {
 			parents.Push(node)
 		}
 	}
@@ -402,14 +404,14 @@ func (t *Immutable) ForEachByHeight(heightLessThan uint32, fn func(k Key, v *Val
 		parents.Push(node)
 	}
 	for parents.Len() > 0 {
-		node := parents.Pop()
-		if !fn(node.key, node.value) {
+		pnode := parents.Pop()
+		if !fn(pnode.key, pnode.value) {
 			return
 		}
 
 		// Extend the nodes to traverse by all children to the left of
 		// the current node's right child.
-		for node := node.right; node != nil && node.priority < heightLessThan; node = node.left {
+		for node := pnode.right; node != nil && node.priority < heightLessThan; node = node.left {
 			parents.Push(node)
 		}
 	}

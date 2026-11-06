@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 //
@@ -15,27 +15,33 @@ import (
 	"math"
 	"math/big"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/chaincfg/chainec"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/txscript"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/txscript/v4"
+	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
 )
 
 // TxType indicates the type of tx (regular or stake type).
 type TxType int
 
-// Possible TxTypes.  Statically declare these so that they might be used in
-// consensus code.
+// Possible TxTypes.
 const (
 	TxTypeRegular TxType = iota
 	TxTypeSStx
 	TxTypeSSGen
 	TxTypeSSRtx
+	TxTypeTAdd
+	TxTypeTSpend
+	TxTypeTreasuryBase
 )
 
 const (
+	// TxVersionAutoRevocations is the revocation transaction version that enables
+	// automatic ticket revocations.
+	TxVersionAutoRevocations uint16 = 2
+
 	// MaxInputsPerSStx is the maximum number of inputs allowed in an SStx.
 	MaxInputsPerSStx = 64
 
@@ -52,6 +58,12 @@ const (
 	// which are all outputs to the addresses specified in the OP_RETURNs of
 	// the original SStx referenced as input plus reference and vote
 	// OP_RETURN outputs in the zeroeth and first position.
+	//
+	// NOTE: If the treasury agenda is active, an OP_RETURN TV (treasury vote)
+	// output is additionally included in the last position when voting on a
+	// treasury spend.  The MaxOutputsPerSSGen value does NOT account for this
+	// output, and should technically be increased by 1, but since the treasury
+	// agenda is already active this cannot be updated without a consensus vote.
 	MaxOutputsPerSSGen = MaxInputsPerSStx + 2
 
 	// NumInputsPerSSRtx is the exact number of inputs for an SSRtx (stake
@@ -60,16 +72,15 @@ const (
 
 	// MaxOutputsPerSSRtx is the maximum number of outputs in an SSRtx, which
 	// are all outputs to the addresses specified in the OP_RETURNs of the
-	// original SStx referenced as input plus a reference to the block header
-	// hash of the block in which voting was missed.
+	// original SStx referenced.
 	MaxOutputsPerSSRtx = MaxInputsPerSStx
 
-	// SStxPKHMinOutSize is the minimum size of of an OP_RETURN commitment output
+	// SStxPKHMinOutSize is the minimum size of an OP_RETURN commitment output
 	// for an SStx tx.
 	// 20 bytes P2SH/P2PKH + 8 byte amount + 4 byte fee range limits
 	SStxPKHMinOutSize = 32
 
-	// SStxPKHMaxOutSize is the maximum size of of an OP_RETURN commitment output
+	// SStxPKHMaxOutSize is the maximum size of an OP_RETURN commitment output
 	// for an SStx tx.
 	SStxPKHMaxOutSize = 77
 
@@ -113,6 +124,11 @@ const (
 	// is set.
 	SStxRevReturnFractionMask = 0x3f00
 
+	// SStxRevReturnFractionShift is the number of bits to shift to the right
+	// to yield the correct value after applying the SStxRevReturnFractionMask
+	// bitmask with AND.
+	SStxRevReturnFractionShift = 8
+
 	// SStxVoteFractionFlag is a bitflag mask specifying whether or not to
 	// apply a fractional limit to the amount used for fees in a vote.
 	// 00000000 00000000 = No fees allowed
@@ -128,6 +144,10 @@ const (
 	// VoteConsensusVersionAbsent is the value of the consensus version
 	// for a short read of the voteBits.
 	VoteConsensusVersionAbsent = 0
+
+	// MaxDataCarrierSize is the maximum number of bytes allowed in pushed
+	// data in the various stake transactions.
+	MaxDataCarrierSize = 256
 )
 
 var (
@@ -147,13 +167,13 @@ var (
 	// 0x?? 0x?? 0x?? 0x??
 	//
 	// 0x?? 0x??           (2 byte range limits)
-	validSStxAddressOutMinPrefix = []byte{0x6a, 0x1e}
+	validSStxAddressOutMinPrefix = []byte{txscript.OP_RETURN, txscript.OP_DATA_30}
 
 	// validSSGenReferenceOutPrefix is the valid prefix for a block
 	// reference output for an SSGen tx.
 	// Example SStx address out:
 	// 0x6a (OP_RETURN)
-	// 0x28 (OP_DATA_40, push length: 40 bytes)
+	// 0x24 (OP_DATA_36, push length: 36 bytes)
 	//
 	// 0x?? 0x?? 0x?? 0x?? (32 byte block header hash for the block
 	// 0x?? 0x?? 0x?? 0x??   you wish to vote on)
@@ -166,7 +186,7 @@ var (
 	//
 	// 0x?? 0x?? 0x?? 0x?? (4 byte uint32 for the height of the block
 	//                      that you wish to vote on)
-	validSSGenReferenceOutPrefix = []byte{0x6a, 0x24}
+	validSSGenReferenceOutPrefix = []byte{txscript.OP_RETURN, txscript.OP_DATA_36}
 
 	// validSSGenVoteOutMinPrefix is the valid prefix for a vote output for an
 	// SSGen tx.
@@ -174,16 +194,12 @@ var (
 	// 0x02 (OP_DATA_2 to OP_DATA_75, push length: 2-75 bytes)
 	//
 	// 0x?? 0x?? (VoteBits) ... 0x??
-	validSSGenVoteOutMinPrefix = []byte{0x6a, 0x02}
+	validSSGenVoteOutMinPrefix = []byte{txscript.OP_RETURN, txscript.OP_DATA_2}
 
 	// zeroHash is the zero value for a chainhash.Hash and is defined as
 	// a package level variable to avoid the need to create a new instance
 	// every time a check is needed.
 	zeroHash = &chainhash.Hash{}
-
-	// rangeLimitMax is the maximum bitshift for a fees limit on an
-	// sstx commitment output.
-	rangeLimitMax = uint16(63)
 )
 
 // VoteBits is a field representing the mandatory 2-byte field of voteBits along
@@ -191,6 +207,21 @@ var (
 type VoteBits struct {
 	Bits         uint16
 	ExtendedBits []byte
+}
+
+// VoteVersionTuple contains the extracted vote bits and version from votes
+// (SSGen).
+type VoteVersionTuple struct {
+	Version uint32
+	Bits    uint16
+}
+
+// SpentTicketsInBlock stores the hashes of the spent (both voted and revoked)
+// tickets of a given block, along with the vote information.
+type SpentTicketsInBlock struct {
+	VotedTickets   []chainhash.Hash
+	RevokedTickets []chainhash.Hash
+	Votes          []VoteVersionTuple
 }
 
 // --------------------------------------------------------------------------------
@@ -220,6 +251,50 @@ func isNullFraudProof(tx *wire.MsgTx) bool {
 	}
 
 	return true
+}
+
+// isSmallInt returns whether or not the opcode is considered a small integer,
+// which is an OP_0, or OP_1 through OP_16.
+//
+// NOTE: This function is only valid for version 0 opcodes.
+func isSmallInt(op byte) bool {
+	return op == txscript.OP_0 || (op >= txscript.OP_1 && op <= txscript.OP_16)
+}
+
+// IsNullDataScript returns whether or not the passed script is a null
+// data script.
+//
+// NOTE: This function is only valid for version 0 scripts.  It will always
+// return false for other script versions.
+func IsNullDataScript(scriptVersion uint16, script []byte) bool {
+	// The only supported script version is 0.
+	if scriptVersion != 0 {
+		return false
+	}
+
+	// A null script is of the form:
+	//  OP_RETURN <optional data>
+	//
+	// Thus, it can either be a single OP_RETURN or an OP_RETURN followed by a
+	// data push up to MaxDataCarrierSize bytes.
+
+	// The script can't possibly be a null data script if it doesn't start
+	// with OP_RETURN.  Fail fast to avoid more work below.
+	if len(script) < 1 || script[0] != txscript.OP_RETURN {
+		return false
+	}
+
+	// Single OP_RETURN.
+	if len(script) == 1 {
+		return true
+	}
+
+	// OP_RETURN followed by data push up to MaxDataCarrierSize bytes.
+	tokenizer := txscript.MakeScriptTokenizer(scriptVersion, script[1:])
+	return tokenizer.Next() && tokenizer.Done() &&
+		(isSmallInt(tokenizer.Opcode()) ||
+			tokenizer.Opcode() <= txscript.OP_PUSHDATA4) &&
+		len(tokenizer.Data()) <= MaxDataCarrierSize
 }
 
 // IsStakeBase returns whether or not a tx could be considered as having a
@@ -266,10 +341,11 @@ func ConvertToMinimalOutputs(tx *wire.MsgTx) []*MinimalOutput {
 }
 
 // SStxStakeOutputInfo takes an SStx as input and scans through its outputs,
-// returning the pubkeyhashs and amounts for any NullDataTy's (future
+// returning the pubkeyhashs and amounts for any null data pushes (future
 // commitments to stake generation rewards).
 func SStxStakeOutputInfo(outs []*MinimalOutput) ([]bool, [][]byte, []int64,
 	[]int64, [][]bool, [][]uint16) {
+
 	expectedInLen := len(outs) / 2
 	isP2SH := make([]bool, expectedInLen)
 	addresses := make([][]byte, expectedInLen)
@@ -287,7 +363,7 @@ func SStxStakeOutputInfo(outs []*MinimalOutput) ([]bool, [][]byte, []int64,
 		if (idx > 0) && (idx%2 != 0) {
 			// The MSB (sign), not used ever normally, encodes whether
 			// or not it is a P2PKH or P2SH for the input.
-			amtEncoded := make([]byte, 8, 8)
+			amtEncoded := make([]byte, 8)
 			copy(amtEncoded, out.PkScript[22:30])
 			isP2SH[idx/2] = !(amtEncoded[7]&(1<<7) == 0) // MSB set?
 			amtEncoded[7] &= ^uint8(1 << 7)              // Clear bit
@@ -297,8 +373,8 @@ func SStxStakeOutputInfo(outs []*MinimalOutput) ([]bool, [][]byte, []int64,
 
 			// Get flags and restrictions for the outputs to be
 			// make in either a vote or revocation.
-			spendRules := make([]bool, 2, 2)
-			spendLimits := make([]uint16, 2, 2)
+			spendRules := make([]bool, 2)
+			spendLimits := make([]uint16, 2)
 
 			// This bitflag is true/false.
 			feeLimitUint16 := binary.LittleEndian.Uint16(out.PkScript[30:32])
@@ -311,7 +387,7 @@ func SStxStakeOutputInfo(outs []*MinimalOutput) ([]bool, [][]byte, []int64,
 			// This is the fraction to use out of 64.
 			spendLimits[0] = feeLimitUint16 & SStxVoteReturnFractionMask
 			spendLimits[1] = feeLimitUint16 & SStxRevReturnFractionMask
-			spendLimits[1] >>= 8
+			spendLimits[1] >>= SStxRevReturnFractionShift
 			allSpendLimits[idx/2] = spendLimits
 		}
 
@@ -328,108 +404,58 @@ func SStxStakeOutputInfo(outs []*MinimalOutput) ([]bool, [][]byte, []int64,
 }
 
 // TxSStxStakeOutputInfo takes an SStx as input and scans through its outputs,
-// returning the pubkeyhashs and amounts for any NullDataTy's (future
+// returning the pubkeyhashs and amounts for any null data pushes (future
 // commitments to stake generation rewards).
 func TxSStxStakeOutputInfo(tx *wire.MsgTx) ([]bool, [][]byte, []int64, []int64,
 	[][]bool, [][]uint16) {
+
 	return SStxStakeOutputInfo(ConvertToMinimalOutputs(tx))
 }
 
-// AddrFromSStxPkScrCommitment extracts a P2SH or P2PKH address from a
-// ticket commitment pkScript.
-func AddrFromSStxPkScrCommitment(pkScript []byte,
-	params *chaincfg.Params) (dcrutil.Address, error) {
+// AddrFromSStxPkScrCommitment extracts a P2SH or P2PKH address from a ticket
+// commitment pkScript.
+func AddrFromSStxPkScrCommitment(pkScript []byte, params stdaddr.AddressParams) (stdaddr.StakeAddress, error) {
 	if len(pkScript) < SStxPKHMinOutSize {
-		return nil, stakeRuleError(ErrSStxBadCommitAmount, "short read "+
-			"of sstx commit pkscript")
+		str := "short read of sstx commit pkscript"
+		return nil, stakeRuleError(ErrSStxBadCommitAmount, str)
 	}
 
-	// The MSB (sign), not used ever normally, encodes whether
-	// or not it is a P2PKH or P2SH for the input.
-	amtEncoded := make([]byte, 8, 8)
-	copy(amtEncoded, pkScript[22:30])
-	isP2SH := !(amtEncoded[7]&(1<<7) == 0) // MSB set?
+	// The MSB of the encoded amount specifies if the output is P2SH.  Since
+	// it is encoded with little endian, the MSB is in final byte in the encoded
+	// amount.
+	//
+	// This is a faster equivalent of:
+	//
+	//	amtBytes := script[22:30]
+	//	amtEncoded := binary.LittleEndian.Uint64(amtBytes)
+	//	isP2SH := (amtEncoded & uint64(1<<63)) != 0
+	isP2SH := pkScript[29]&0x80 != 0
 
 	// The 20 byte PKH or SH.
 	hashBytes := pkScript[2:22]
 
-	var err error
-	var addr dcrutil.Address
+	// Return the correct address type.
 	if isP2SH {
-		addr, err = dcrutil.NewAddressScriptHashFromHash(hashBytes, params)
-	} else {
-		addr, err = dcrutil.NewAddressPubKeyHash(hashBytes, params,
-			chainec.ECTypeSecp256k1)
+		return stdaddr.NewAddressScriptHashV0FromHash(hashBytes, params)
 	}
-
-	return addr, err
+	return stdaddr.NewAddressPubKeyHashEcdsaSecp256k1V0(hashBytes, params)
 }
 
 // AmountFromSStxPkScrCommitment extracts a commitment amount from a
 // ticket commitment pkScript.
 func AmountFromSStxPkScrCommitment(pkScript []byte) (dcrutil.Amount, error) {
 	if len(pkScript) < SStxPKHMinOutSize {
-		return 0, stakeRuleError(ErrSStxBadCommitAmount, "short read "+
-			"of sstx commit pkscript")
+		str := "short read of sstx commit pkscript"
+		return 0, stakeRuleError(ErrSStxBadCommitAmount, str)
 	}
 
 	// The MSB (sign), not used ever normally, encodes whether
 	// or not it is a P2PKH or P2SH for the input.
-	amtEncoded := make([]byte, 8, 8)
+	amtEncoded := make([]byte, 8)
 	copy(amtEncoded, pkScript[22:30])
 	amtEncoded[7] &= ^uint8(1 << 7) // Clear bit for P2SH flag
 
 	return dcrutil.Amount(binary.LittleEndian.Uint64(amtEncoded)), nil
-}
-
-// TxSSGenStakeOutputInfo takes an SSGen tx as input and scans through its
-// outputs, returning the amount of the output and the PKH or SH that it was
-// sent to.
-func TxSSGenStakeOutputInfo(tx *wire.MsgTx, params *chaincfg.Params) ([]bool,
-	[][]byte, []int64, error) {
-	numOutputsInSSGen := len(tx.TxOut)
-
-	isP2SH := make([]bool, numOutputsInSSGen-2)
-	addresses := make([][]byte, numOutputsInSSGen-2)
-	amounts := make([]int64, numOutputsInSSGen-2)
-
-	// Cycle through the inputs and generate
-	for idx, out := range tx.TxOut {
-		// We only care about the outputs where we get proportional
-		// amounts and the PKHs they were sent to.
-		if (idx > 1) && (idx < numOutputsInSSGen) {
-			// Get the PKH or SH it's going to, and what type of
-			// script it is.
-			class, addr, _, err :=
-				txscript.ExtractPkScriptAddrs(out.Version, out.PkScript, params)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if class != txscript.StakeGenTy {
-				return nil, nil, nil, fmt.Errorf("ssgen output included non "+
-					"ssgen tagged output in idx %v", idx)
-			}
-			subClass, err := txscript.GetStakeOutSubclass(out.PkScript)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if !(subClass == txscript.PubKeyHashTy ||
-				subClass == txscript.ScriptHashTy) {
-				return nil, nil, nil, fmt.Errorf("bad script type")
-			}
-			isP2SH[idx-2] = false
-			if subClass == txscript.ScriptHashTy {
-				isP2SH[idx-2] = true
-			}
-
-			// Get the amount that was sent.
-			amt := out.Value
-			addresses[idx-2] = addr[0].ScriptAddress()
-			amounts[idx-2] = amt
-		}
-	}
-
-	return isP2SH, addresses, amounts, nil
 }
 
 // SSGenBlockVotedOn takes an SSGen tx and returns the block voted on in the
@@ -437,17 +463,17 @@ func TxSSGenStakeOutputInfo(tx *wire.MsgTx, params *chaincfg.Params) ([]bool,
 //
 // This function is only safe to be called on a transaction that
 // has passed IsSSGen.
-func SSGenBlockVotedOn(tx *wire.MsgTx) (chainhash.Hash, uint32, error) {
-	// Get the block header hash.
-	blockHash, err := chainhash.NewHash(tx.TxOut[0].PkScript[2:34])
-	if err != nil {
-		return chainhash.Hash{}, 0, err
-	}
+func SSGenBlockVotedOn(tx *wire.MsgTx) (chainhash.Hash, uint32) {
+	// Get the block header hash.  Note that the actual number of bytes is
+	// specified here over using chainhash.HashSize in order to statically
+	// assert hash sizes have not changed.
+	var blockHash [32]byte
+	copy(blockHash[:], tx.TxOut[0].PkScript[2:34])
 
 	// Get the block height.
 	height := binary.LittleEndian.Uint32(tx.TxOut[0].PkScript[34:38])
 
-	return *blockHash, height, nil
+	return chainhash.Hash(blockHash), height
 }
 
 // SSGenVoteBits takes an SSGen tx as input and scans through its
@@ -473,52 +499,6 @@ func SSGenVersion(tx *wire.MsgTx) uint32 {
 	return binary.LittleEndian.Uint32(tx.TxOut[1].PkScript[4:8])
 }
 
-// TxSSRtxStakeOutputInfo takes an SSRtx tx as input and scans through its
-// outputs, returning the amount of the output and the pkh that it was sent to.
-func TxSSRtxStakeOutputInfo(tx *wire.MsgTx, params *chaincfg.Params) ([]bool,
-	[][]byte, []int64, error) {
-	numOutputsInSSRtx := len(tx.TxOut)
-
-	isP2SH := make([]bool, numOutputsInSSRtx)
-	addresses := make([][]byte, numOutputsInSSRtx)
-	amounts := make([]int64, numOutputsInSSRtx)
-
-	// Cycle through the inputs and generate
-	for idx, out := range tx.TxOut {
-		// Get the PKH or SH it's going to, and what type of
-		// script it is.
-		class, addr, _, err :=
-			txscript.ExtractPkScriptAddrs(out.Version, out.PkScript, params)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if class != txscript.StakeRevocationTy {
-			return nil, nil, nil, fmt.Errorf("ssrtx output included non "+
-				"ssrtx tagged output in idx %v", idx)
-		}
-		subClass, err := txscript.GetStakeOutSubclass(out.PkScript)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if !(subClass == txscript.PubKeyHashTy ||
-			subClass == txscript.ScriptHashTy) {
-			return nil, nil, nil, fmt.Errorf("bad script type")
-		}
-		isP2SH[idx] = false
-		if subClass == txscript.ScriptHashTy {
-			isP2SH[idx] = true
-		}
-
-		// Get the amount that was sent.
-		amt := out.Value
-
-		addresses[idx] = addr[0].ScriptAddress()
-		amounts[idx] = amt
-	}
-
-	return isP2SH, addresses, amounts, nil
-}
-
 // SStxNullOutputAmounts takes an array of input amounts, change amounts, and a
 // ticket purchase amount, calculates the adjusted proportion from the purchase
 // amount, stores it in an array, then returns the array.  That is, for any given
@@ -531,14 +511,13 @@ func SStxNullOutputAmounts(amounts []int64,
 	lengthAmounts := len(amounts)
 
 	if lengthAmounts != len(changeAmounts) {
-		errStr := fmt.Sprintf("amounts was not equal in length " +
-			"to change amounts!")
-		return 0, nil, errors.New(errStr)
+		const str = "amounts was not equal in length to change amounts!"
+		return 0, nil, errors.New(str)
 	}
 
 	if amountTicket <= 0 {
-		errStr := fmt.Sprintf("committed amount was too small!")
-		return 0, nil, stakeRuleError(ErrSStxBadCommitAmount, errStr)
+		str := "committed amount was too small!"
+		return 0, nil, stakeRuleError(ErrSStxBadCommitAmount, str)
 	}
 
 	contribAmounts := make([]int64, lengthAmounts)
@@ -552,9 +531,9 @@ func SStxNullOutputAmounts(amounts []int64,
 	for i := 0; i < lengthAmounts; i++ {
 		contribAmounts[i] = amounts[i] - changeAmounts[i]
 		if contribAmounts[i] < 0 {
-			errStr := fmt.Sprintf("change at idx %v spent more coins than "+
+			str := fmt.Sprintf("change at idx %v spent more coins than "+
 				"allowed (have: %v, spent: %v)", i, amounts[i], changeAmounts[i])
-			return 0, nil, stakeRuleError(ErrSStxBadChangeAmts, errStr)
+			return 0, nil, stakeRuleError(ErrSStxBadChangeAmts, str)
 		}
 
 		sum += contribAmounts[i]
@@ -565,214 +544,150 @@ func SStxNullOutputAmounts(amounts []int64,
 	return fees, contribAmounts, nil
 }
 
-// CalculateRewards takes a list of SStx adjusted output amounts, the amount used
-// to purchase that ticket, and the reward for an SSGen tx and subsequently
-// generates what the outputs should be in the SSGen tx.  If used for calculating
-// the outputs for an SSRtx, pass 0 for subsidy.
-func CalculateRewards(amounts []int64, amountTicket int64,
-	subsidy int64) []int64 {
-	outputsAmounts := make([]int64, len(amounts))
-
-	// SSGen handling
-	amountWithStakebase := amountTicket + subsidy
+// calculateTicketReturnAmounts calculates the required amounts to return from a
+// ticket for the given original contribution amounts, the price the ticket was
+// purchased for, and the vote subsidy (if any) to include.
+//
+// Since multiple inputs can be used to purchase a ticket, each one contributes
+// a portion of the overall ticket purchase, including the transaction fee.
+// Thus, when claiming the ticket, either due to it being selected to vote, or
+// being revoked, each output must receive the same proportion of the total
+// amount returned.
+//
+// The vote subsidy must be 0 for revocations since, unlike votes, they do not
+// produce any additional subsidy.
+//
+// Note: This function is intended to only be a helper function, and when
+// calculating rewards CalculateRewards or CalculateRevocationRewards should be
+// used.
+func calculateTicketReturnAmounts(contribAmounts []int64, ticketPurchaseAmount,
+	voteSubsidy int64) []int64 {
 
 	// Get the sum of the amounts contributed between both fees
 	// and contributions to the ticket.
 	totalContrib := int64(0)
-	for _, amount := range amounts {
+	for _, amount := range contribAmounts {
 		totalContrib += amount
 	}
-
-	// Now we want to get the adjusted amounts including the reward.
-	// The algorithm is like this:
-	// 1 foreach amount
-	// 2     amount *= 2^32
-	// 3     amount /= amountTicket
-	// 4     amount *= amountWithStakebase
-	// 5     amount /= 2^32
-	amountWithStakebaseBig := big.NewInt(amountWithStakebase)
 	totalContribBig := big.NewInt(totalContrib)
 
-	for idx, amount := range amounts {
-		amountBig := big.NewInt(amount) // We need > 64 bits
+	// Create a slice for the return amounts.
+	numReturnAmounts := uint32(len(contribAmounts))
+	returnAmounts := make([]int64, numReturnAmounts)
 
-		// mul amountWithStakebase
-		amountBig.Mul(amountBig, amountWithStakebaseBig)
-
-		// mul 2^32
-		amountBig.Lsh(amountBig, 32)
-
-		// div totalContrib
-		amountBig.Div(amountBig, totalContribBig)
-
-		// div 2^32
-		amountBig.Rsh(amountBig, 32)
-
-		// make int64
-		amountFinal := int64(amountBig.Uint64())
-
-		outputsAmounts[idx] = amountFinal
+	// Calculate the return amounts.
+	totalOutputAmt := ticketPurchaseAmount + voteSubsidy
+	totalOutputAmtBig := big.NewInt(totalOutputAmt)
+	for i, contribAmount := range contribAmounts {
+		// This is effectively equivalent to:
+		//
+		//                  total output amount
+		// return amount =  ------------------- * contribution amount
+		//                  total contributions
+		//
+		// However, in order to avoid floating point math, it uses 64.32 fixed point
+		// integer division to perform:
+		//
+		//                   --                                              --
+		//                  | total output amount * contribution amount * 2^32 |
+		//                  | ------------------------------------------------ |
+		// return amount =  |                total contributions               |
+		//                   --                                              --
+		//                  ----------------------------------------------------
+		//                                        2^32
+		//
+		returnAmtBig := big.NewInt(contribAmount)
+		returnAmtBig.Mul(returnAmtBig, totalOutputAmtBig)
+		returnAmtBig.Lsh(returnAmtBig, 32)
+		returnAmtBig.Div(returnAmtBig, totalContribBig)
+		returnAmtBig.Rsh(returnAmtBig, 32)
+		returnAmounts[i] = returnAmtBig.Int64()
 	}
 
-	return outputsAmounts
+	return returnAmounts
 }
 
-// VerifySStxAmounts compares a list of calculated amounts for ticket commitments
-// to the list of commitment amounts from the actual SStx.
-func VerifySStxAmounts(sstxAmts []int64, sstxCalcAmts []int64) error {
-	if len(sstxCalcAmts) != len(sstxAmts) {
-		errStr := fmt.Sprintf("SStx verify error: number of calculated " +
-			"sstx output values was not equivalent to the number of sstx " +
-			"commitment outputs")
-		return stakeRuleError(ErrVerSStxAmts, errStr)
-	}
-
-	for idx, amt := range sstxCalcAmts {
-		if !(amt == sstxAmts[idx]) {
-			errStr := fmt.Sprintf("SStx verify error: at index %v incongruent "+
-				"amt %v in SStx calculated reward and amt %v in "+
-				"SStx", idx, amt, sstxAmts[idx])
-			return stakeRuleError(ErrVerSStxAmts, errStr)
-		}
-	}
-
-	return nil
-}
-
-// VerifyStakingPkhsAndAmounts takes the following:
-// 1. sstxTypes: A list of types for what the output should be (P2PK or P2SH).
-// 2. sstxPkhs: A list of payee PKHs from NullDataTy outputs of an input SStx.
-// 3. ssSpendAmts: What the payouts in an SSGen/SSRtx tx actually were.
-// 4. ssSpendTypes: A list of types for what the outputs actually were.
-// 5. ssSpendPkhs: A list of payee PKHs from OP_SSGEN tagged outputs of the SSGen
-//     or SSRtx.
-// 6. ssSpendCalcAmts: A list of payee amounts that was calculated based on
-//     the input SStx.  These are the maximum possible amounts that can be
-//     transacted from this output.
-// 7. isVote: Whether this is a vote (true) or revocation (false).
-// 8. spendRules: Spending rules for each output in terms of fees allowable
-//     as extracted from the origin output Version.
-// 9. spendLimits: Spending limits for each output in terms of fees allowable
-//     as extracted from the origin output Version.
+// CalculateRewards calculates the required amounts to return for a vote given
+// the original contribution amounts for the ticket, the price the ticket was
+// purchased for, and the vote subsidy to include.
 //
-// and determines if the two pairs of slices are congruent or not.
-func VerifyStakingPkhsAndAmounts(
-	sstxTypes []bool,
-	sstxPkhs [][]byte,
-	ssSpendAmts []int64,
-	ssSpendTypes []bool,
-	ssSpendPkhs [][]byte,
-	ssSpendCalcAmts []int64,
-	isVote bool,
-	spendRules [][]bool,
-	spendLimits [][]uint16) error {
+// Since multiple inputs can be used to purchase a ticket, each one contributes
+// a portion of the overall ticket purchase, including the transaction fee.
+// Thus, when claiming the ticket, each output must receive the same proportion
+// of the total amount returned.
+//
+// After the original contribution amounts are evenly distributed to each
+// output, there may be a remainder left over of 1 to numOutputs - 1 atoms.
+// This remainder ends up as part of the transaction fee.
+//
+// Note: If calculating rewards for a revocation, CalculateRevocationRewards
+// should be used instead.
+func CalculateRewards(contribAmounts []int64, ticketPurchaseAmount,
+	voteSubsidy int64) []int64 {
 
-	if len(sstxTypes) != len(ssSpendTypes) {
-		errStr := fmt.Sprintf("Staking verify error: number of " +
-			"sstx type values was not equivalent to the number " +
-			"of ss*** type values")
-		return stakeRuleError(ErrVerifyInput, errStr)
+	return calculateTicketReturnAmounts(contribAmounts, ticketPurchaseAmount,
+		voteSubsidy)
+}
+
+// CalculateRevocationRewards calculates the required amounts to return for a
+// revocation given the original contribution amounts for the ticket and the
+// price the ticket was purchased for.
+//
+// Since multiple inputs can be used to purchase a ticket, each one contributes
+// a portion of the overall ticket purchase, including the transaction fee.
+// Thus, when claiming the ticket, each output must receive the same proportion
+// of the total amount returned.
+//
+// After the original contribution amounts are evenly distributed to each
+// output, there may be a remainder left over of 1 to numOutputs - 1 atoms.
+// If the automatic ticket revocations agenda is not active, this remainder ends
+// up as part of the transaction fee.  If the agenda is active, each atom in the
+// remainder is added to an output index that is selected in a uniformly random
+// manner, where Hash256PRNG seeded with the previous header bytes is used for
+// the deterministic pseudorandom selection.
+func CalculateRevocationRewards(contribAmounts []int64, ticketPurchaseAmount int64,
+	prevHeaderBytes []byte, isAutoRevocationsEnabled bool) []int64 {
+
+	// Calculate the evenly distributed return amounts from the original
+	// contribution amounts.
+	returnAmounts := calculateTicketReturnAmounts(contribAmounts,
+		ticketPurchaseAmount, 0)
+
+	// Return now if the automatic ticket revocations agenda is not active, and
+	// any remainder will end up as part of the transaction fee.
+	if !isAutoRevocationsEnabled {
+		return returnAmounts
 	}
 
-	if len(ssSpendAmts) != len(ssSpendCalcAmts) {
-		errStr := fmt.Sprintf("Staking verify error: number of " +
-			"sstx output values was not equivalent to the number " +
-			"of ss*** output values")
-		return stakeRuleError(ErrVerifyInput, errStr)
+	// Calculate the total return amount.
+	totalReturnAmount := int64(0)
+	for _, amount := range returnAmounts {
+		totalReturnAmount += amount
 	}
 
-	if len(sstxPkhs) != len(ssSpendPkhs) {
-		errStr := fmt.Sprintf("Staking verify error: number of " +
-			"sstx output pks was not equivalent to the number " +
-			"of ss*** output pkhs")
-		return stakeRuleError(ErrVerifyInput, errStr)
-	}
-
-	for idx, typ := range sstxTypes {
-		if typ != ssSpendTypes[idx] {
-			errStr := fmt.Sprintf("SStx in/SS*** out verify error: at index %v "+
-				"non-equivalent type %v in SStx and type %v in SS***", idx, typ,
-				ssSpendTypes[idx])
-			return stakeRuleError(ErrVerifyOutType, errStr)
+	// If the automatic ticket revocations agenda is active, and there is a
+	// remainder after distributing the returns, then select a uniformly
+	// pseudorandom output index to receive each remaining atom.
+	if totalReturnAmount < ticketPurchaseAmount {
+		numReturnAmounts := uint32(len(returnAmounts))
+		remainder := ticketPurchaseAmount - totalReturnAmount
+		prng := NewHash256PRNG(prevHeaderBytes)
+		for i := int64(0); i < remainder; i++ {
+			returnIndex := prng.UniformRandom(numReturnAmounts)
+			returnAmounts[returnIndex]++
 		}
 	}
 
-	for idx, amt := range ssSpendAmts {
-		rule := false
-		limit := uint16(0)
-		if isVote {
-			// Vote.
-			rule = spendRules[idx][0]
-			limit = spendLimits[idx][0]
-		} else {
-			// Revocation.
-			rule = spendRules[idx][1]
-			limit = spendLimits[idx][1]
-		}
-
-		// Apply the spending rules and see if the transaction is within
-		// the specified limits if it asks us to.
-		if rule {
-			// If 63 is given, the entire amount may be used as a fee.
-			// Obviously we can't allow shifting 1 63 places because
-			// we'd get a negative number.
-			feeAllowance := ssSpendCalcAmts[idx]
-			if limit < rangeLimitMax {
-				if int64(1<<uint64(limit)) < ssSpendCalcAmts[idx] {
-					feeAllowance = int64(1 << uint64(limit))
-				}
-			}
-
-			amtLimitLow := ssSpendCalcAmts[idx] - feeAllowance
-			amtLimitHigh := ssSpendCalcAmts[idx]
-
-			// Our new output is not allowed to be below this minimum
-			// amount.
-			if amt < amtLimitLow {
-				errStr := fmt.Sprintf("SStx in/SS*** out verify error: "+
-					"at index %v amt min limit was calculated to be %v yet "+
-					"the actual amount output was %v", idx, amtLimitLow,
-					amt)
-				return stakeRuleError(ErrVerifyTooMuchFees, errStr)
-			}
-			// It also isn't allowed to spend more than the maximum
-			// amount.
-			if amt > amtLimitHigh {
-				errStr := fmt.Sprintf("at index %v amt max limit was "+
-					"calculated to be %v yet the actual amount output "+
-					"was %v", idx, amtLimitHigh, amt)
-				return stakeRuleError(ErrVerifySpendTooMuch, errStr)
-			}
-		} else {
-			// Fees are disabled.
-			if amt != ssSpendCalcAmts[idx] {
-				errStr := fmt.Sprintf("SStx in/SS*** out verify error: "+
-					"at index %v non-equivalent amt %v in SStx and amt "+
-					"%v in SS***", idx, amt, ssSpendCalcAmts[idx])
-				return stakeRuleError(ErrVerifyOutputAmt, errStr)
-			}
-		}
-	}
-
-	for idx, pkh := range sstxPkhs {
-		if !bytes.Equal(pkh, ssSpendPkhs[idx]) {
-			errStr := fmt.Sprintf("SStx in/SS*** out verify error: at index %v "+
-				"non-equivalent pkh %x in SStx and pkh %x in SS***", idx, pkh,
-				ssSpendPkhs[idx])
-			return stakeRuleError(ErrVerifyOutPkhs, errStr)
-		}
-	}
-
-	return nil
+	return returnAmounts
 }
 
 // --------------------------------------------------------------------------------
 // Stake Transaction Identification Functions
 // --------------------------------------------------------------------------------
 
-// IsSStx returns whether or not a transaction is an SStx.  It does some
-// simple validation steps to make sure the number of inputs, number of
-// outputs, and the input/output scripts are valid.
+// CheckSStx returns an error if a transaction is not a stake submission
+// transaction.  It does some simple validation steps to make sure the number of
+// inputs, number of outputs, and the input/output scripts are valid.
 //
 // SStx transactions are specified as below.
 // Inputs:
@@ -789,55 +704,56 @@ func VerifyStakingPkhsAndAmounts(
 // OP_SSTXCHANGE tagged output for input 2 [index 4]
 // ...
 // OP_RETURN push of input MaxInputsPerSStx's address for reward receiving
-//     [index (MaxInputsPerSStx*2)-2]
+//
+//	[index (MaxInputsPerSStx*2)-2]
+//
 // OP_SSTXCHANGE tagged output [index (MaxInputsPerSStx*2)-1]
 //
 // The output OP_RETURN pushes should be of size 20 bytes (standard address).
-//
-// The errors in this function can be ignored if you want to use it in to
-// identify SStx from a list of stake tx.
-func IsSStx(tx *wire.MsgTx) (bool, error) {
+func CheckSStx(tx *wire.MsgTx) error {
 	// Check to make sure there aren't too many inputs.
-	// CheckTransactionSanity already makes sure that number of inputs is
+	// Transaction sanity checks already make sure that number of inputs is
 	// greater than 0, so no need to check that.
 	if len(tx.TxIn) > MaxInputsPerSStx {
-		return false, stakeRuleError(ErrSStxTooManyInputs, "SStx has too many "+
-			"inputs")
+		str := "SStx has too many inputs"
+		return stakeRuleError(ErrSStxTooManyInputs, str)
 	}
 
 	// Check to make sure there aren't too many outputs.
 	if len(tx.TxOut) > MaxOutputsPerSStx {
-		return false, stakeRuleError(ErrSStxTooManyOutputs, "SStx has too many "+
-			"outputs")
+		str := "SStx has too many outputs"
+		return stakeRuleError(ErrSStxTooManyOutputs, str)
 	}
 
 	// Check to make sure there are some outputs.
 	if len(tx.TxOut) == 0 {
-		return false, stakeRuleError(ErrSStxNoOutputs, "SStx has no "+
-			"outputs")
+		str := "SStx has no outputs"
+		return stakeRuleError(ErrSStxNoOutputs, str)
 	}
 
-	// Check to make sure that all output scripts are the default version.
+	// All output scripts must be version 0.
+	const consensusScriptVer = 0
 	for idx, txOut := range tx.TxOut {
-		if txOut.Version != txscript.DefaultScriptVersion {
-			errStr := fmt.Sprintf("invalid script version found in "+
+		if txOut.Version != consensusScriptVer {
+			str := fmt.Sprintf("invalid script version found in "+
 				"txOut idx %v", idx)
-			return false, stakeRuleError(ErrSStxInvalidOutputs, errStr)
+			return stakeRuleError(ErrSStxInvalidOutputs, str)
 		}
 	}
 
 	// Ensure that the first output is tagged OP_SSTX.
-	if txscript.GetScriptClass(tx.TxOut[0].Version, tx.TxOut[0].PkScript) !=
-		txscript.StakeSubmissionTy {
-		return false, stakeRuleError(ErrSStxInvalidOutputs, "First SStx output "+
-			"should have been OP_SSTX tagged, but it was not")
+	if !IsTicketPurchaseScript(tx.TxOut[0].Version, tx.TxOut[0].PkScript) {
+		str := "first SStx output should have been OP_SSTX tagged, " +
+			"but it was not"
+		return stakeRuleError(ErrSStxInvalidOutputs, str)
 	}
 
 	// Ensure that the number of outputs is equal to the number of inputs
 	// + 1.
 	if (len(tx.TxIn)*2 + 1) != len(tx.TxOut) {
-		return false, stakeRuleError(ErrSStxInOutProportions, "The number of "+
-			"inputs in the SStx tx was not the number of outputs/2 - 1")
+		str := "the number of inputs in the SStx tx was not the number " +
+			"of outputs/2 - 1"
+		return stakeRuleError(ErrSStxInOutProportions, str)
 	}
 
 	// Ensure that the rest of the odd outputs are 28-byte OP_RETURN pushes that
@@ -849,30 +765,28 @@ func IsSStx(tx *wire.MsgTx) (bool, error) {
 
 		// Check change outputs.
 		if outTxIndex%2 == 0 {
-			if txscript.GetScriptClass(scrVersion, rawScript) !=
-				txscript.StakeSubChangeTy {
+			if !IsStakeChangeScript(scrVersion, rawScript) {
 				str := fmt.Sprintf("SStx output at output index %d was not "+
 					"an sstx change output", outTxIndex)
-				return false, stakeRuleError(ErrSStxInvalidOutputs, str)
+				return stakeRuleError(ErrSStxInvalidOutputs, str)
 			}
 			continue
 		}
 
 		// Else (odd) check commitment outputs.  The script should be a
-		// NullDataTy output.
-		if txscript.GetScriptClass(scrVersion, rawScript) !=
-			txscript.NullDataTy {
+		// null data output.
+		if !IsNullDataScript(scrVersion, rawScript) {
 			str := fmt.Sprintf("SStx output at output index %d was not "+
-				"a NullData (OP_RETURN) push", outTxIndex)
-			return false, stakeRuleError(ErrSStxInvalidOutputs, str)
+				"a null data (OP_RETURN) push", outTxIndex)
+			return stakeRuleError(ErrSStxInvalidOutputs, str)
 		}
 
 		// The length of the output script should be between 32 and 77 bytes long.
 		if len(rawScript) < SStxPKHMinOutSize ||
 			len(rawScript) > SStxPKHMaxOutSize {
 			str := fmt.Sprintf("SStx output at output index %d was a "+
-				"NullData (OP_RETURN) push of the wrong size", outTxIndex)
-			return false, stakeRuleError(ErrSStxInvalidOutputs, str)
+				"null data (OP_RETURN) push of the wrong size", outTxIndex)
+			return stakeRuleError(ErrSStxInvalidOutputs, str)
 		}
 
 		// The OP_RETURN output script prefix should conform to the standard.
@@ -888,72 +802,221 @@ func IsSStx(tx *wire.MsgTx) (bool, error) {
 		// valid push length.
 		if !(outputScriptPrefix[0] == validSStxAddressOutMinPrefix[0]) ||
 			!pushLengthValid {
-			errStr := fmt.Sprintf("sstx commitment at output idx %v had "+
+			str := fmt.Sprintf("sstx commitment at output idx %v had "+
 				"an invalid prefix", outTxIndex)
-			return false, stakeRuleError(ErrSStxInvalidOutputs,
-				errStr)
+			return stakeRuleError(ErrSStxInvalidOutputs, str)
 		}
 	}
 
-	return true, nil
+	return nil
 }
 
-// IsSSGen returns whether or not a transaction is an SSGen tx.  It does some
-// simple validation steps to make sure the number of inputs, number of
-// outputs, and the input/output scripts are valid.
+// IsSStx returns whether or not a transaction is a stake submission transaction.
+// These are also known as tickets.
+func IsSStx(tx *wire.MsgTx) bool {
+	return CheckSStx(tx) == nil
+}
+
+// TreasuryVoteT is the type that designates a treasury vote.  There are two
+// valid bits that may be set, although not simultaneously. 0x01 and 0x02. Any
+// other (or lack therefore) bits are considered invalid.
+type TreasuryVoteT byte
+
+const (
+	// TreasuryVoteInvalid identifies an invalid vote for a treasury spend
+	// transaction.
+	TreasuryVoteInvalid TreasuryVoteT = 0x00
+
+	// TreasuryVoteYes identifies a vote in favor of a specific treasury spend
+	// transaction.
+	TreasuryVoteYes TreasuryVoteT = 0x01
+
+	// TreasuryVoteNo identifies a vote against a specific treasury spend
+	// transaction.
+	TreasuryVoteNo TreasuryVoteT = 0x02
+)
+
+// CheckTreasuryVote ensures that the provided treasury vote is valid. If the
+// vote is valid the proper value is returned.
+func CheckTreasuryVote(vote TreasuryVoteT) (TreasuryVoteT, error) {
+	switch vote {
+	case TreasuryVoteYes:
+	case TreasuryVoteNo:
+	default:
+		return TreasuryVoteInvalid,
+			fmt.Errorf("invalid treasury vote: 0x%x", vote)
+	}
+	return vote, nil
+}
+
+// IsTreasuryVote returns true if the provided vote is valid.
+func IsTreasuryVote(vote TreasuryVoteT) bool {
+	_, err := CheckTreasuryVote(vote)
+	return err == nil
+}
+
+// TreasuryVoteTuple is a tuple that groups a TSpend hash and its associated
+// vote bits.
+type TreasuryVoteTuple struct {
+	Hash chainhash.Hash
+	Vote TreasuryVoteT
+}
+
+// GetSSGenTreasuryVotes pulls out treasury votes for TSpend transactions. This
+// function is a convenience function to discourage rolling new versions that
+// pull out votes and may be therefore different from consensus.
+// This function verifies that the passed in script is of the following form:
+// OP_RETURN DATA_PUSH []byte{'T', 'V'} N-votes
+// and returns a slice of hashes which represent the TSpend transactions they
+// are supposed to vote on.
+func GetSSGenTreasuryVotes(PkScript []byte) ([]TreasuryVoteTuple, error) {
+	// Verify that there is enough length to contain a discriminator.
+	// Expect at least: OP_RETURN DATA_PUSH Y Z
+	// The final check that is parenthesis is to prevent crashing when
+	// using an illegal script.  This cannot be hit but it is verified
+	// anyway.
+	if len(PkScript) < 4 || PkScript[1] > txscript.OP_PUSHDATA1 {
+		str := fmt.Sprintf("final output of a SSGen does not " +
+			"contain a valid type discriminator")
+		return nil, stakeRuleError(ErrSSGenInvalidDiscriminatorLength,
+			str)
+	}
+
+	// Determine start of discriminator based on the opcode in [1].
+	start := 2
+	if PkScript[1] == txscript.OP_PUSHDATA1 {
+		start = 3
+	}
+
+	if start+2 > len(PkScript) {
+		str := fmt.Sprintf("final output of a SSGen is not a valid " +
+			"nullscript")
+		return nil, stakeRuleError(ErrSSGenInvalidNullScript,
+			str)
+	}
+
+	// Ensure discriminator is TV.
+	if !bytes.Equal(PkScript[start:start+2], []byte{'T', 'V'}) {
+		str := fmt.Sprintf("last SSGen unknown type discriminator: "+
+			"0x%x 0x%x", PkScript[start], PkScript[start+1])
+		return nil, stakeRuleError(ErrSSGenUnknownDiscriminator, str)
+	}
+
+	// Since this is a 'T','V' we expect N hashes and their vote bits.
+	const size = chainhash.HashSize + 1
+	if len(PkScript[start+2:]) < size ||
+		len(PkScript[start+2:])%size != 0 {
+		str := fmt.Sprintf("SSGen 'T','V' invalid " +
+			"length")
+		return nil, stakeRuleError(ErrSSGenInvalidTVLength,
+			str)
+	}
+
+	// Return hashes, this is the success path.
+	const maxVotes = 7
+	votes := make([]TreasuryVoteTuple, 0, maxVotes)
+	vmap := make(map[chainhash.Hash]struct{}, maxVotes) // Collision detection
+	for i := start + 2; ; i += size {
+
+		if len(PkScript[i:]) < size {
+			break
+		}
+		var hash chainhash.Hash
+		copy(hash[:], PkScript[i:size+i-1])
+		vote := TreasuryVoteT(PkScript[size+i-1])
+		if !IsTreasuryVote(vote) {
+			str := fmt.Sprintf("SSGen invalid treasury "+
+				"vote bits 0x%0x", vote)
+			return nil,
+				stakeRuleError(ErrSSGenInvalidTreasuryVote,
+					str)
+		}
+
+		// Ensure there are no duplicate TSpend votes.
+		if _, ok := vmap[hash]; ok {
+			str := fmt.Sprintf("SSGen duplicate treasury "+
+				"vote %v", hash)
+			return nil,
+				stakeRuleError(ErrSSGenDuplicateTreasuryVote,
+					str)
+		}
+		vmap[hash] = struct{}{}
+
+		// Store votes in order of appearance.
+		votes = append(votes, TreasuryVoteTuple{
+			Hash: hash,
+			Vote: vote,
+		})
+	}
+	return votes, nil
+}
+
+// CheckSSGenVotes returns an error if a transaction is not a stake submission
+// generation transaction.  It does some simple validation steps to make sure
+// the number of inputs, number of outputs, and the input/output scripts are
+// valid. In addition it returns treasury votes to avoid subsequent expensive
+// calls.
 //
 // This does NOT check to see if the subsidy is valid or whether or not the
 // value of input[0] + subsidy = value of the outputs.
 //
 // SSGen transactions are specified as below.
+//
 // Inputs:
-// Stakebase null input [index 0]
-// SStx-tagged output [index 1]
+//
+//	[index 0] Stakebase null input
+//	[index 1] SStx-tagged output
 //
 // Outputs:
-// OP_RETURN push of 40 bytes containing: [index 0]
-//     i. 32-byte block header of block being voted on.
-//     ii. 8-byte int of this block's height.
-// OP_RETURN push of 2 bytes containing votebits [index 1]
-// SSGen-tagged output to address from SStx-tagged output's tx index output 1
-//     [index 2]
-// SSGen-tagged output to address from SStx-tagged output's tx index output 2
-//     [index 3]
-// ...
-// SSGen-tagged output to address from SStx-tagged output's tx index output
-//     MaxInputsPerSStx [index MaxOutputsPerSSgen - 1]
 //
-// The errors in this function can be ignored if you want to use it in to
-// identify SSGen from a list of stake tx.
-func IsSSGen(tx *wire.MsgTx) (bool, error) {
+//	[index 0] OP_RETURN push of 40 bytes containing:
+//	  i. 32-byte block header of block being voted on.
+//	  ii. 8-byte int of this block's height.
+//	[index 1] OP_RETURN push of 2 bytes containing votebits
+//	[index 2] SSGen-tagged output to the first payment commitment address from
+//	  SStx-tagged output's tx (output index 1)
+//	[index 3] SSGen-tagged output to the second payment commitment address from
+//	  SStx-tagged output's tx (output index 3)
+//	...
+//	[index maxOuts - 2] SSGen-tagged output to the last payment
+//	  commitment address from SStx-tagged output's tx index output (output
+//	  index MaxInputsPerSStx - 1)
+//	[index maxOuts - 1] OP_RETURN push of 2 bytes containing opcode
+//	  designating what the remaining data that is pushed is.  In the case of
+//	  'TV' (Treasury Vote) it checks for a <hash><vote> tuple. For example:
+//	  OP_RETURN OP_DATA_X 'T','V' <N hashvote_tuple>
+//	  NOTE: This output is only appended when a treasury spend is being voted
+//	  on.
+func CheckSSGenVotes(tx *wire.MsgTx) ([]TreasuryVoteTuple, error) {
 	// Check to make sure there aren't too many inputs.
-	// CheckTransactionSanity already makes sure that number of inputs is
-	// greater than 0, so no need to check that.
 	if len(tx.TxIn) != NumInputsPerSSGen {
-		return false, stakeRuleError(ErrSSGenWrongNumInputs, "SSgen tx has an "+
-			"invalid number of inputs")
+		str := "SSgen tx has an invalid number of inputs"
+		return nil, stakeRuleError(ErrSSGenWrongNumInputs, str)
 	}
 
 	// Check to make sure there aren't too many outputs.
 	if len(tx.TxOut) > MaxOutputsPerSSGen {
-		return false, stakeRuleError(ErrSSGenTooManyOutputs, "SSgen tx has too "+
-			"many outputs")
+		str := "SSgen tx has too many outputs"
+		return nil, stakeRuleError(ErrSSGenTooManyOutputs, str)
 	}
 
-	// Check to make sure there are some outputs.
-	if len(tx.TxOut) == 0 {
-		return false, stakeRuleError(ErrSSGenNoOutputs, "SSgen tx no "+
-			"many outputs")
+	// Check to make sure there are enough outputs.
+	if len(tx.TxOut) < 2 {
+		str := "SSgen tx does not have enough outputs"
+		return nil, stakeRuleError(ErrSSGenNoOutputs, str)
 	}
 
 	// Ensure that the first input is a stake base null input.
-	// Also checks to make sure that there aren't too many or too few inputs.
+	// Also checks to make sure that there aren't too many or too few
+	// inputs.
 	if !IsStakeBase(tx) {
-		return false, stakeRuleError(ErrSSGenNoStakebase, "SSGen tx did not "+
-			"include a stakebase in the zeroeth input position")
+		str := "SSGen tx did not include a stakebase in the zeroeth " +
+			"input position"
+		return nil, stakeRuleError(ErrSSGenNoStakebase, str)
 	}
 
-	// Check to make sure that the output used as input came from TxTreeStake.
+	// Check to make sure that the output used as input came from
+	// TxTreeStake.
 	for i, txin := range tx.TxIn {
 		// Skip the stakebase
 		if i == 0 {
@@ -961,46 +1024,40 @@ func IsSSGen(tx *wire.MsgTx) (bool, error) {
 		}
 
 		if txin.PreviousOutPoint.Index != 0 {
-			errStr := fmt.Sprintf("SSGen used an invalid input idx (got %v, "+
+			str := fmt.Sprintf("SSGen used an invalid input idx (got %v, "+
 				"want 0)", txin.PreviousOutPoint.Index)
-			return false, stakeRuleError(ErrSSGenWrongIndex, errStr)
+			return nil, stakeRuleError(ErrSSGenWrongIndex, str)
 		}
 
 		if txin.PreviousOutPoint.Tree != wire.TxTreeStake {
-			return false, stakeRuleError(ErrSSGenWrongTxTree, "SSGen used "+
-				"a non-stake input")
+			str := "SSGen used a non-stake input"
+			return nil, stakeRuleError(ErrSSGenWrongTxTree, str)
 		}
 	}
 
-	// Check to make sure that all output scripts are the default version.
+	// All output scripts must be version 0.
+	const consensusScriptVer = 0
 	for _, txOut := range tx.TxOut {
-		if txOut.Version != txscript.DefaultScriptVersion {
-			return false, stakeRuleError(ErrSSGenBadGenOuts, "invalid "+
-				"script version found in txOut")
+		if txOut.Version != consensusScriptVer {
+			str := "invalid script version found in txOut"
+			return nil, stakeRuleError(ErrSSGenBadGenOuts, str)
 		}
 	}
-
-	// Ensure the number of outputs is equal to the number of inputs found in
-	// the original SStx + 2.
-	// TODO: Do this in validate, requires DB and valid chain.
-
-	// Ensure that the second input is an SStx tagged output.
-	// TODO: Do this in validate, as we don't want to actually lookup
-	// old tx here.  This function is for more general sorting.
 
 	// Ensure that the first output is an OP_RETURN push.
 	zeroethOutputVersion := tx.TxOut[0].Version
 	zeroethOutputScript := tx.TxOut[0].PkScript
-	if txscript.GetScriptClass(zeroethOutputVersion, zeroethOutputScript) !=
-		txscript.NullDataTy {
-		return false, stakeRuleError(ErrSSGenNoReference, "First SSGen output "+
-			"should have been an OP_RETURN data push, but was not")
+	if !IsNullDataScript(zeroethOutputVersion, zeroethOutputScript) {
+		str := "first SSGen output should have been an OP_RETURN " +
+			"data push, but was not"
+		return nil, stakeRuleError(ErrSSGenNoReference, str)
 	}
 
 	// Ensure that the first output is the correct size.
 	if len(zeroethOutputScript) != SSGenBlockReferenceOutSize {
-		return false, stakeRuleError(ErrSSGenBadReference, "First SSGen output "+
-			"should have been 43 bytes long, but was not")
+		str := fmt.Sprintf("first SSGen output has invalid an length (got %d, "+
+			"want %d)", len(zeroethOutputScript), SSGenBlockReferenceOutSize)
+		return nil, stakeRuleError(ErrSSGenBadReference, str)
 	}
 
 	// The OP_RETURN output script prefix for block referencing should
@@ -1010,29 +1067,26 @@ func IsSSGen(tx *wire.MsgTx) (bool, error) {
 	zeroethOutputScriptPrefix := zeroethOutputScriptBuffer.Next(2)
 	if !bytes.Equal(zeroethOutputScriptPrefix,
 		validSSGenReferenceOutPrefix) {
-		return false, stakeRuleError(ErrSSGenBadReference, "First SSGen output "+
-			"had an invalid prefix")
+		str := "first SSGen output had an invalid prefix"
+		return nil, stakeRuleError(ErrSSGenBadReference, str)
 	}
-
-	// Ensure that the block header hash given in the first 32 bytes of the
-	// OP_RETURN push is a valid block header and found in the main chain.
-	// TODO: This is validate level stuff, do this there.
 
 	// Ensure that the second output is an OP_RETURN push.
 	firstOutputVersion := tx.TxOut[1].Version
 	firstOutputScript := tx.TxOut[1].PkScript
-	if txscript.GetScriptClass(firstOutputVersion, firstOutputScript) !=
-		txscript.NullDataTy {
-		return false, stakeRuleError(ErrSSGenNoVotePush, "Second SSGen output "+
-			"should have been an OP_RETURN data push, but was not")
+	if !IsNullDataScript(firstOutputVersion, firstOutputScript) {
+		str := "second SSGen output should have been an OP_RETURN " +
+			"data push, but was not"
+		return nil, stakeRuleError(ErrSSGenNoVotePush, str)
 	}
 
-	// The length of the output script should be between 4 and 77 bytes long.
+	// The length of the output script should be between 4 and 77 bytes
+	// long.
 	if len(firstOutputScript) < SSGenVoteBitsOutputMinSize ||
 		len(firstOutputScript) > SSGenVoteBitsOutputMaxSize {
-		str := fmt.Sprintf("SSGen votebits output at output index 1 was a " +
-			"NullData (OP_RETURN) push of the wrong size")
-		return false, stakeRuleError(ErrSSGenBadVotePush, str)
+		str := fmt.Sprintf("SSGen votebits output at output index 1 " +
+			"was a NullData (OP_RETURN) push of the wrong size")
+		return nil, stakeRuleError(ErrSSGenBadVotePush, str)
 	}
 
 	// The OP_RETURN output script prefix for voting should conform to the
@@ -1049,101 +1103,127 @@ func IsSSGen(tx *wire.MsgTx) (bool, error) {
 	// valid push length.
 	if !(firstOutputScriptPrefix[0] == validSSGenVoteOutMinPrefix[0]) ||
 		!pushLengthValid {
-		return false, stakeRuleError(ErrSSGenBadVotePush, "Second SSGen output "+
-			"had an invalid prefix")
+		str := "second SSGen output had an invalid prefix"
+		return nil, stakeRuleError(ErrSSGenBadVotePush, str)
 	}
 
-	// Ensure that the tx height given in the last 8 bytes is StakeMaturity
-	// many blocks ahead of the block in which that SStx appears, otherwise
-	// this ticket has failed to mature and the SStx must be invalid.
-	// TODO: This is validate level stuff, do this there.
+	// Check to see if the last output is an OP_RETURN followed by a 2 byte
+	// data push that designates what the data is that follows the
+	// discriminator. In the case of 'T','V' the next data push should be N
+	// hashes. If it is we need to decrease the count on OP_SSGEN tests by
+	// one.
+	txOutLen := len(tx.TxOut)
+	lastTxOut := tx.TxOut[len(tx.TxOut)-1]
+	var votes []TreasuryVoteTuple
+	if IsNullDataScript(lastTxOut.Version, lastTxOut.PkScript) {
+		txOutLen--
+
+		// We call this function in order to prevent rolling of
+		// additional functions that may not conform 100% to consensus.
+		var err error
+		votes, err = GetSSGenTreasuryVotes(lastTxOut.PkScript)
+		if err != nil {
+			return nil, err
+		}
+
+		// If there are votes the TxVersion must be TxVersionTreasury.
+		// This test is done late in order to allow older versions
+		// SSGen if there are no votes.
+		if !(len(votes) > 0 && tx.Version == wire.TxVersionTreasury) {
+			str := fmt.Sprintf("SSGen invalid tx version %v",
+				tx.Version)
+			return nil, stakeRuleError(ErrSSGenInvalidTxVersion,
+				str)
+		}
+	}
 
 	// Ensure that the remaining outputs are OP_SSGEN tagged.
-	for outTxIndex := 2; outTxIndex < len(tx.TxOut); outTxIndex++ {
+	for outTxIndex := 2; outTxIndex < txOutLen; outTxIndex++ {
 		scrVersion := tx.TxOut[outTxIndex].Version
 		rawScript := tx.TxOut[outTxIndex].PkScript
 
 		// The script should be a OP_SSGEN tagged output.
-		if txscript.GetScriptClass(scrVersion, rawScript) !=
-			txscript.StakeGenTy {
-			str := fmt.Sprintf("SSGen tx output at output index %d was not "+
-				"an OP_SSGEN tagged output", outTxIndex)
-			return false, stakeRuleError(ErrSSGenBadGenOuts, str)
+		if !IsVoteScript(scrVersion, rawScript) {
+			str := fmt.Sprintf("SSGen tx output at output "+
+				"index %d was not an OP_SSGEN tagged output",
+				outTxIndex)
+			return nil, stakeRuleError(ErrSSGenBadGenOuts, str)
 		}
 	}
 
-	return true, nil
+	return votes, nil
 }
 
-// IsSSRtx returns whether or not a transaction is an SSRtx.  It does some
-// simple validation steps to make sure the number of inputs, number of
-// outputs, and the input/output scripts are valid.
+// CheckSSGen wraps CheckSSGenVotes (which is the old CheckSSGen plus it
+// returns TSpend votes if there are any) to maintain consistency and backwards
+// compatibility.
+func CheckSSGen(tx *wire.MsgTx) error {
+	_, err := CheckSSGenVotes(tx)
+	return err
+}
+
+// IsSSGen returns whether or not a transaction is a stake submission generation
+// transaction.  These are also known as votes.
+func IsSSGen(tx *wire.MsgTx) bool {
+	return CheckSSGen(tx) == nil
+}
+
+// CheckSSRtx returns an error if a transaction is not a stake submission
+// revocation transaction.  It does some simple validation steps to make sure
+// the number of inputs, number of outputs, and the input/output scripts are
+// valid.
 //
 // SSRtx transactions are specified as below.
+//
 // Inputs:
-// SStx-tagged output [index 0]
+//
+//	[index 0] SStx-tagged output
 //
 // Outputs:
-// SSGen-tagged output to address from SStx-tagged output's tx index output 1
-//     [index 0]
-// SSGen-tagged output to address from SStx-tagged output's tx index output 2
-//     [index 1]
-// ...
-// SSGen-tagged output to address from SStx-tagged output's tx index output
-//     MaxInputsPerSStx [index MaxOutputsPerSSRtx - 1]
 //
-// The errors in this function can be ignored if you want to use it in to
-// identify SSRtx from a list of stake tx.
-func IsSSRtx(tx *wire.MsgTx) (bool, error) {
+//	[index 0] SSRtx-tagged output to the first payment commitment address from
+//	  SStx-tagged output's tx (output index 1)
+//	[index 1] SSRtx-tagged output to the second payment commitment address from
+//	  SStx-tagged output's tx (output index 3)
+//	...
+//	[index MaxOutputsPerSSRtx - 1] SSRtx-tagged output to the last payment
+//	  commitment address from SStx-tagged output's tx index output (output
+//	  index MaxInputsPerSStx - 1)
+func CheckSSRtx(tx *wire.MsgTx) error {
 	// Check to make sure there is the correct number of inputs.
-	// CheckTransactionSanity already makes sure that number of inputs is
-	// greater than 0, so no need to check that.
 	if len(tx.TxIn) != NumInputsPerSSRtx {
-		return false, stakeRuleError(ErrSSRtxWrongNumInputs, "SSRtx has an "+
-			" invalid number of inputs")
+		str := "SSRtx has an invalid number of inputs"
+		return stakeRuleError(ErrSSRtxWrongNumInputs, str)
 	}
 
 	// Check to make sure there aren't too many outputs.
 	if len(tx.TxOut) > MaxOutputsPerSSRtx {
-		return false, stakeRuleError(ErrSSRtxTooManyOutputs, "SSRtx has too "+
-			"many outputs")
+		str := "SSRtx has too many outputs"
+		return stakeRuleError(ErrSSRtxTooManyOutputs, str)
 	}
 
 	// Check to make sure there are some outputs.
 	if len(tx.TxOut) == 0 {
-		return false, stakeRuleError(ErrSSRtxNoOutputs, "SSRtx has no "+
-			"outputs")
+		str := "SSRtx has no outputs"
+		return stakeRuleError(ErrSSRtxNoOutputs, str)
 	}
 
-	// Check to make sure that all output scripts are the default version.
+	// All output scripts must be version 0.
+	const consensusScriptVer = 0
 	for _, txOut := range tx.TxOut {
-		if txOut.Version != txscript.DefaultScriptVersion {
-			return false, stakeRuleError(ErrSSRtxBadOuts, "invalid "+
-				"script version found in txOut")
+		if txOut.Version != consensusScriptVer {
+			str := "invalid script version found in txOut"
+			return stakeRuleError(ErrSSRtxBadOuts, str)
 		}
 	}
 
 	// Check to make sure that the output used as input came from TxTreeStake.
 	for _, txin := range tx.TxIn {
 		if txin.PreviousOutPoint.Tree != wire.TxTreeStake {
-			return false, stakeRuleError(ErrSSRtxWrongTxTree, "SSRtx used "+
-				"a non-stake input")
+			str := "SSRtx used a non-stake input"
+			return stakeRuleError(ErrSSRtxWrongTxTree, str)
 		}
 	}
-
-	// Ensure that the first input is an SStx tagged output.
-	// TODO: Do this in validate, needs a DB and chain.
-
-	// Ensure that the tx height given in the last 8 bytes is StakeMaturity
-	// many blocks ahead of the block in which that SStx appear, otherwise
-	// this ticket has failed to mature and the SStx must be invalid.
-	// TODO: Do this in validate, needs a DB and chain.
-
-	// Ensure that the outputs are OP_SSRTX tagged.
-	// Ensure that the tx height given in the last 8 bytes is StakeMaturity
-	// many blocks ahead of the block in which that SStx appear, otherwise
-	// this ticket has failed to mature and the SStx must be invalid.
-	// TODO: This is validate level stuff, do this there.
 
 	// Ensure that the outputs are OP_SSRTX tagged.
 	for outTxIndex := 0; outTxIndex < len(tx.TxOut); outTxIndex++ {
@@ -1151,45 +1231,248 @@ func IsSSRtx(tx *wire.MsgTx) (bool, error) {
 		rawScript := tx.TxOut[outTxIndex].PkScript
 
 		// The script should be a OP_SSRTX tagged output.
-		if txscript.GetScriptClass(scrVersion, rawScript) !=
-			txscript.StakeRevocationTy {
+		if !IsRevocationScript(scrVersion, rawScript) {
 			str := fmt.Sprintf("SSRtx output at output index %d was not "+
 				"an OP_SSRTX tagged output", outTxIndex)
-			return false, stakeRuleError(ErrSSRtxBadOuts, str)
+			return stakeRuleError(ErrSSRtxBadOuts, str)
 		}
 	}
 
-	// Ensure the number of outputs is equal to the number of inputs found in
-	// the original SStx.
-	// TODO: Do this in validate, needs a DB and chain.
+	// Additional checks if the transaction version is greater than or equal to
+	// the version that enables automatic ticket revocations.
+	if tx.Version >= TxVersionAutoRevocations {
+		// The input must have an empty signature script.
+		if len(tx.TxIn[0].SignatureScript) != 0 {
+			return stakeRuleError(ErrSSRtxInputHasSigScript, "SSRtx input 0 "+
+				"contains a non-empty signature script")
+		}
 
-	return true, nil
+		// The fee must be zero.
+		outputAmt := int64(0)
+		for _, txOut := range tx.TxOut {
+			outputAmt += txOut.Value
+		}
+		inputAmt := tx.TxIn[0].ValueIn
+		if outputAmt < inputAmt {
+			return stakeRuleError(ErrSSRtxInvalidFee, "SSRtx has a non-zero fee")
+		}
+	}
+
+	return nil
+}
+
+// IsSSRtx returns whether or not a transaction is a stake submission revocation
+// transaction.  These are also known as revocations.
+func IsSSRtx(tx *wire.MsgTx) bool {
+	return CheckSSRtx(tx) == nil
 }
 
 // DetermineTxType determines the type of stake transaction a transaction is; if
 // none, it returns that it is an assumed regular tx.
 func DetermineTxType(tx *wire.MsgTx) TxType {
-	if is, _ := IsSStx(tx); is {
+	if IsSStx(tx) {
 		return TxTypeSStx
 	}
-	if is, _ := IsSSGen(tx); is {
+	if IsSSGen(tx) {
 		return TxTypeSSGen
 	}
-	if is, _ := IsSSRtx(tx); is {
+	if IsSSRtx(tx) {
 		return TxTypeSSRtx
+	}
+	if tx.Version >= wire.TxVersionTreasury {
+		if IsTAdd(tx) {
+			return TxTypeTAdd
+		}
+		if IsTSpend(tx) {
+			return TxTypeTSpend
+		}
+		if IsTreasuryBase(tx) {
+			return TxTypeTreasuryBase
+		}
 	}
 	return TxTypeRegular
 }
 
-// SetTxTree analyzes the embedded MsgTx and sets the transaction tree
-// accordingly.
-func SetTxTree(tx *dcrutil.Tx) {
-	txType := DetermineTxType(tx.MsgTx())
+// IsStakeCommitmentTxOut indicates whether the transaction output identified by
+// the given index is a stake commitment output of a stake submission (aka
+// ticket) transaction.  Stake commitment outputs are the odd-numbered outputs.
+//
+// This function is only safe to be called on a transaction that has passed
+// IsSStx.
+func IsStakeCommitmentTxOut(index int) bool {
+	return (index % 2) != 0
+}
 
-	indicatedTree := wire.TxTreeRegular
-	if txType != TxTypeRegular {
-		indicatedTree = wire.TxTreeStake
+// FindSpentTicketsInBlock returns information about tickets spent in a given
+// block. This includes voted and revoked tickets, and the vote bits of each
+// spent ticket. This is faster than calling the individual functions to
+// determine ticket state if all information regarding spent tickets is needed.
+//
+// Note that the returned hashes are of the originally purchased *tickets* and
+// **NOT** of the vote/revoke transaction.
+//
+// The tickets are determined **only** from the STransactions of the provided
+// block and no validation is performed.
+//
+// This function is only safe to be called with a block that has previously
+// had all header commitments validated.
+func FindSpentTicketsInBlock(block *wire.MsgBlock) *SpentTicketsInBlock {
+	votes := make([]VoteVersionTuple, 0, block.Header.Voters)
+	voters := make([]chainhash.Hash, 0, block.Header.Voters)
+	revocations := make([]chainhash.Hash, 0, block.Header.Revocations)
+
+	for _, stx := range block.STransactions {
+		if IsSSGen(stx) {
+			voters = append(voters, stx.TxIn[1].PreviousOutPoint.Hash)
+			votes = append(votes, VoteVersionTuple{
+				Version: SSGenVersion(stx),
+				Bits:    SSGenVoteBits(stx),
+			})
+			continue
+		}
+		if IsSSRtx(stx) {
+			revocations = append(revocations, stx.TxIn[0].PreviousOutPoint.Hash)
+			continue
+		}
+	}
+	return &SpentTicketsInBlock{
+		VotedTickets:   voters,
+		Votes:          votes,
+		RevokedTickets: revocations,
+	}
+}
+
+// CreateRevocationFromTicket creates a revocation transaction for the provided
+// ticket.  The provided fee is applied to the first output of the created
+// revocation unless it does not adhere to the fee limit imposed by the ticket,
+// in which case an error is returned.
+func CreateRevocationFromTicket(ticketHash *chainhash.Hash,
+	ticketMinOuts []*MinimalOutput, revocationTxFee dcrutil.Amount,
+	revocationTxVersion uint16, params *chaincfg.Params,
+	prevHeaderBytes []byte, isAutoRevocationsEnabled bool) (*wire.MsgTx, error) {
+
+	// Validate that the provided ticket minimal outputs have a non-zero length.
+	if len(ticketMinOuts) == 0 {
+		return nil, stakeRuleError(ErrSStxNoOutputs, "no minimal outputs")
 	}
 
-	tx.SetTree(indicatedTree)
+	// If the automatic ticket revocations agenda is active, then the fee must be
+	// 0 and the version must be 2.
+	if isAutoRevocationsEnabled {
+		if revocationTxFee != 0 {
+			str := "fee must be zero when auto revocations is active"
+			return nil, stakeRuleError(ErrSSRtxInvalidFee, str)
+		}
+
+		if revocationTxVersion != TxVersionAutoRevocations {
+			str := fmt.Sprintf("version must be %d when auto revocations is active",
+				TxVersionAutoRevocations)
+			return nil, stakeRuleError(ErrSSRtxInvalidTxVersion, str)
+		}
+	}
+
+	// Create the revocation transaction and add the input.  The only input for a
+	// revocation transaction is a ticket submission (OP_SSTX tagged) output.
+	revocationTx := wire.NewMsgTx()
+	const ticketSubmissionOutput = 0
+	const tree = wire.TxTreeStake
+	ticketSubmissionAmount := ticketMinOuts[ticketSubmissionOutput].Value
+	prevOut := wire.NewOutPoint(ticketHash, ticketSubmissionOutput, tree)
+	txIn := wire.NewTxIn(prevOut, ticketSubmissionAmount, nil)
+	revocationTx.AddTxIn(txIn)
+
+	// All output scripts must be version 0.
+	const consensusScriptVer = 0
+	for i, ticketMinOut := range ticketMinOuts {
+		if ticketMinOut.Version != consensusScriptVer {
+			str := fmt.Sprintf("invalid script version found in ticket minimal "+
+				"outputs idx %d", i)
+			return nil, stakeRuleError(ErrSStxInvalidOutputs, str)
+		}
+	}
+
+	// Get the ticket commitment output details.
+	isP2SH, payToHashes, amounts, _, hasFeeLimit, feeLimits :=
+		SStxStakeOutputInfo(ticketMinOuts)
+
+	// In the returned ticket stake output values, vote fee limit info is in index
+	// 0 and revocation fee limit info is in index 1.
+	const revocationFeeLimitIndex = 1
+
+	// Calculate the revocation output values from this data.
+	revocationOutputAmounts := CalculateRevocationRewards(amounts,
+		ticketSubmissionAmount, prevHeaderBytes, isAutoRevocationsEnabled)
+
+	// Add all the SSRtx-tagged transaction outputs to the transaction after
+	// performing some validity checks.
+	feeApplied := false
+	for i, payToHash := range payToHashes {
+		// Ensure amount is in the valid range for monetary amounts.
+		if amounts[i] < 0 || amounts[i] > dcrutil.MaxAmount {
+			str := fmt.Sprintf("invalid output amount: %v (min: 0, max: %v)",
+				amounts[i], dcrutil.MaxAmount)
+			return nil, stakeRuleError(ErrSStxBadCommitAmount, str)
+		}
+
+		// Create a new script which pays to the provided address specified in
+		// the original ticket tx.
+		var ssrtxOutScript []byte
+		switch isP2SH[i] {
+		case false: // P2PKH
+			addr, err := stdaddr.NewAddressPubKeyHashEcdsaSecp256k1V0(payToHash,
+				params)
+			if err != nil {
+				return nil, err
+			}
+			_, ssrtxOutScript = addr.PayRevokeCommitmentScript()
+		case true: // P2SH
+			addr, err := stdaddr.NewAddressScriptHashV0FromHash(payToHash, params)
+			if err != nil {
+				return nil, err
+			}
+			_, ssrtxOutScript = addr.PayRevokeCommitmentScript()
+		}
+
+		// Validate that the provided fee adheres to the fee limit imposed by the
+		// ticket commitment.
+		hasFeeLimit := hasFeeLimit[i][revocationFeeLimitIndex]
+		feeLimitLog2 := feeLimits[i][revocationFeeLimitIndex]
+		if hasFeeLimit {
+			// Notice that, since the fee limit is in terms of a log2 value, and
+			// amounts are int64, anything greater than or equal to 63 is interpreted
+			// to mean allow spending the entire amount as a fee.  This allows fast
+			// left shifts to be used to calculate the fee limit while preventing
+			// degenerate cases such as negative numbers for 63.
+			if feeLimitLog2 < 63 {
+				feeLimit := int64(1 << uint64(feeLimitLog2))
+				if !feeApplied && int64(revocationTxFee) > feeLimit {
+					str := fmt.Sprintf("fee %v is higher than the imposed fee limit %v",
+						int64(revocationTxFee), feeLimit)
+					return nil, stakeRuleError(ErrSSRtxInvalidFee, str)
+				}
+			}
+		}
+
+		// The fee must be zero when not encumbered with a fee limit.
+		if !hasFeeLimit && revocationTxFee != 0 {
+			str := "fee must be zero when not encumbered with a fee limit"
+			return nil, stakeRuleError(ErrSSRtxInvalidFee, str)
+		}
+
+		// Apply the fee to the output if the fee has not already been applied.
+		amt := revocationOutputAmounts[i]
+		if !feeApplied && int64(revocationTxFee) < amt {
+			amt -= int64(revocationTxFee)
+			feeApplied = true
+		}
+
+		// Add the txout to our SSRtx tx.
+		txOut := wire.NewTxOut(amt, ssrtxOutScript)
+		revocationTx.AddTxOut(txOut)
+	}
+
+	// Set the version of the revocation transaction.
+	revocationTx.Version = revocationTxVersion
+
+	return revocationTx, nil
 }

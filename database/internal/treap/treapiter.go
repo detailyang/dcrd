@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -225,7 +225,7 @@ func (iter *Iterator) Prev() bool {
 	// When there is no left node walk the parents until the parent's left
 	// node is not equal to the previous child.  This will be the previous
 	// node.
-	for iter.node.left == nil {
+	if iter.node.left == nil {
 		parent := iter.parents.Pop()
 		for parent != nil && parent.left == iter.node {
 			iter.node = parent
@@ -319,13 +319,14 @@ func (iter *Iterator) ForceReseek() {
 // unexpected keys and/or values.
 //
 // For example:
-//   iter := t.Iterator(nil, nil)
-//   for iter.Next() {
-//   	if someCondition {
-//   		t.Delete(iter.Key())
-//   		iter.ForceReseek()
-//   	}
-//   }
+//
+//	iter := t.Iterator(nil, nil)
+//	for iter.Next() {
+//		if someCondition {
+//			t.Delete(iter.Key())
+//			iter.ForceReseek()
+//		}
+//	}
 func (t *Mutable) Iterator(startKey, limitKey []byte) *Iterator {
 	iter := &Iterator{
 		t:        t,

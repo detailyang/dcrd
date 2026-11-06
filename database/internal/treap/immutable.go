@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,7 +7,8 @@ package treap
 
 import (
 	"bytes"
-	"math/rand"
+
+	"github.com/decred/dcrd/crypto/rand"
 )
 
 // cloneTreapNode returns a shallow copy of the passed node.
@@ -41,7 +42,7 @@ type Immutable struct {
 	root  *treapNode
 	count int
 
-	// totalSize is the best estimate of the total size of of all data in
+	// totalSize is the best estimate of the total size of all data in
 	// the treap including the keys, values, and node sizes.
 	totalSize uint64
 }

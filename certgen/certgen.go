@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	_ "crypto/sha512" // Needed for RegisterHash in init
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -20,18 +19,31 @@ import (
 	"net"
 	"os"
 	"time"
+	"unicode"
+
+	"github.com/decred/dcrd/crypto/rand"
+	"golang.org/x/net/idna"
 )
 
-// NewTLSCertPair returns a new PEM-encoded x.509 certificate pair.  The
-// machine's local interface addresses and all variants of IPv4 and IPv6
-// localhost are included as valid IP addresses.
+func isASCII(s string) bool {
+	for _, c := range s {
+		if c > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
+}
+
+// NewTLSCertPair returns a new PEM-encoded x.509 certificate pair with new
+// ECDSA keys.  The machine's local interface addresses and all variants of IPv4
+// and IPv6 localhost are included as valid IP addresses.
 func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.Time, extraHosts []string) (cert, key []byte, err error) {
 	now := time.Now()
 	if validUntil.Before(now) {
 		return nil, nil, errors.New("validUntil would create an already-expired certificate")
 	}
 
-	priv, err := ecdsa.GenerateKey(curve, rand.Reader)
+	priv, err := ecdsa.GenerateKey(curve, rand.Reader())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -43,14 +55,17 @@ func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.T
 	}
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate serial number: %s", err)
-	}
+	serialNumber := rand.BigInt(serialNumberLimit)
 
 	host, err := os.Hostname()
 	if err != nil {
 		return nil, nil, err
+	}
+	if !isASCII(host) {
+		host, err = idna.ToASCII(host)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	ipAddresses := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
@@ -61,7 +76,7 @@ func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.T
 
 	addIP := func(ipAddr net.IP) {
 		for _, ip := range ipAddresses {
-			if bytes.Equal(ip, ipAddr) {
+			if ip.Equal(ipAddr) {
 				return
 			}
 		}
@@ -70,6 +85,13 @@ func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.T
 	addHost := func(host string) {
 		for _, dnsName := range dnsNames {
 			if host == dnsName {
+				return
+			}
+		}
+		if !isASCII(host) {
+			var err error
+			host, err = idna.ToASCII(host)
+			if err != nil {
 				return
 			}
 		}
@@ -110,34 +132,34 @@ func NewTLSCertPair(curve elliptic.Curve, organization string, validUntil time.T
 
 		KeyUsage: x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature |
 			x509.KeyUsageCertSign,
-		IsCA: true, // so can sign self.
+		IsCA:                  true, // so can sign self.
 		BasicConstraintsValid: true,
 
 		DNSNames:    dnsNames,
 		IPAddresses: ipAddresses,
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template,
+	derBytes, err := x509.CreateCertificate(rand.Reader(), &template,
 		&template, &priv.PublicKey, priv)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create certificate: %v", err)
+		return nil, nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
 
 	certBuf := &bytes.Buffer{}
 	err = pem.Encode(certBuf, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode certificate: %v", err)
+		return nil, nil, fmt.Errorf("failed to encode certificate: %w", err)
 	}
 
 	keybytes, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal private key: %v", err)
+		return nil, nil, fmt.Errorf("failed to marshal private key: %w", err)
 	}
 
 	keyBuf := &bytes.Buffer{}
 	err = pem.Encode(keyBuf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keybytes})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to encode private key: %v", err)
+		return nil, nil, fmt.Errorf("failed to encode private key: %w", err)
 	}
 
 	return certBuf.Bytes(), keyBuf.Bytes(), nil

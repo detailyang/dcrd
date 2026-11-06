@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -59,18 +60,25 @@ func TestNetAddress(t *testing.T) {
 
 	// Ensure max payload is expected value for latest protocol version.
 	pver := ProtocolVersion
-	wantPayload := uint32(30)
-	maxPayload := maxNetAddressPayload(ProtocolVersion)
+	wantPayload := 30
+	maxPayload := maxNetAddressPayload
 	if maxPayload != wantPayload {
 		t.Errorf("maxNetAddressPayload: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
 	}
 
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
+	}
+
 	// Check for expected failure on wrong address type.
 	udpAddr := &net.UDPAddr{}
 	_, err = NewNetAddress(udpAddr, 0)
-	if err != ErrInvalidNetAddr {
+	if !errors.Is(err, ErrInvalidNetAddr) {
 		t.Errorf("NewNetAddress: expected error not received - "+
 			"got %v, want %v", err, ErrInvalidNetAddr)
 	}
@@ -151,6 +159,14 @@ func TestNetAddressWire(t *testing.T) {
 			continue
 		}
 
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.in.SerializeSize(test.ts)
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
+		}
+
 		// Decode the message from wire format.
 		var na NetAddress
 		rbuf := bytes.NewReader(test.buf)
@@ -215,7 +231,7 @@ func TestNetAddressWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := writeNetAddress(w, test.pver, test.in, test.ts)
-		if err != test.writeErr {
+		if !errors.Is(err, test.writeErr) {
 			t.Errorf("writeNetAddress #%d wrong error got: %v, want: %v",
 				i, err, test.writeErr)
 			continue
@@ -225,7 +241,7 @@ func TestNetAddressWireErrors(t *testing.T) {
 		var na NetAddress
 		r := newFixedReader(test.max, test.buf)
 		err = readNetAddress(r, test.pver, &na, test.ts)
-		if err != test.readErr {
+		if !errors.Is(err, test.readErr) {
 			t.Errorf("readNetAddress #%d wrong error got: %v, want: %v",
 				i, err, test.readErr)
 			continue

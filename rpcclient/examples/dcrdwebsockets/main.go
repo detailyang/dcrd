@@ -1,18 +1,19 @@
 // Copyright (c) 2014-2015 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
-	"io/ioutil"
+	"context"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/decred/dcrd/dcrutil"
-	"github.com/decred/dcrd/rpcclient"
+	"github.com/decred/dcrd/dcrutil/v4"
+	"github.com/decred/dcrd/rpcclient/v9"
 )
 
 func main() {
@@ -31,7 +32,7 @@ func main() {
 
 	// Connect to local dcrd RPC server using websockets.
 	dcrdHomeDir := dcrutil.AppDataDir("dcrd", false)
-	certs, err := ioutil.ReadFile(filepath.Join(dcrdHomeDir, "rpc.cert"))
+	certs, err := os.ReadFile(filepath.Join(dcrdHomeDir, "rpc.cert"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -48,13 +49,14 @@ func main() {
 	}
 
 	// Register for block connect and disconnect notifications.
-	if err := client.NotifyBlocks(); err != nil {
+	ctx := context.Background()
+	if err := client.NotifyBlocks(ctx); err != nil {
 		log.Fatal(err)
 	}
 	log.Println("NotifyBlocks: Registration Complete")
 
 	// Get the current block count.
-	blockCount, err := client.GetBlockCount()
+	blockCount, err := client.GetBlockCount(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}

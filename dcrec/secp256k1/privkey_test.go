@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,50 +7,163 @@ package secp256k1
 
 import (
 	"bytes"
+	cryptorand "crypto/rand"
+	"errors"
+	"math/big"
 	"testing"
 )
 
+// TestGeneratePrivateKey ensures the key generation works as expected.
+func TestGeneratePrivateKey(t *testing.T) {
+	priv, err := GeneratePrivateKey()
+	if err != nil {
+		t.Errorf("failed to generate private key: %s", err)
+		return
+	}
+	pub := priv.PubKey()
+	if !isOnCurve(&pub.x, &pub.y) {
+		t.Error("public key is not on the curve")
+	}
+}
+
+// TestGeneratePrivateKeyFromRand ensures generating a private key from a random
+// entropy source works as expected.
+func TestGeneratePrivateKeyFromRand(t *testing.T) {
+	priv, err := GeneratePrivateKeyFromRand(cryptorand.Reader)
+	if err != nil {
+		t.Errorf("failed to generate private key: %s", err)
+		return
+	}
+	pub := priv.PubKey()
+	if !isOnCurve(&pub.x, &pub.y) {
+		t.Error("public key is not on the curve")
+	}
+}
+
+// mockPrivateKeyReaderFunc is an adapter to allow the use of an ordinary
+// function as an io.Reader.
+type mockPrivateKeyReaderFunc func([]byte) (int, error)
+
+// Read calls the function with the provided parameter and returns the result.
+func (f mockPrivateKeyReaderFunc) Read(p []byte) (int, error) {
+	return f(p)
+}
+
+// TestGeneratePrivateKeyCorners ensures random values that private key
+// generation correctly handles entropy values that are invalid for use as
+// private keys by creating a fake source of randomness to inject known bad
+// values.
+func TestGeneratePrivateKeyCorners(t *testing.T) {
+	// Create a mock reader that returns the following sequence of values:
+	// 1st invocation: 0
+	// 2nd invocation: The curve order
+	// 3rd invocation: The curve order + 1
+	// 4th invocation: 1 (32-byte big endian)
+	oneModN := mustModNScalar("01")
+	var numReads int
+	mockReader := mockPrivateKeyReaderFunc(func(p []byte) (int, error) {
+		numReads++
+		switch numReads {
+		case 1:
+			return copy(p, bytes.Repeat([]byte{0x00}, len(p))), nil
+		case 2:
+			return copy(p, curveParams.N.Bytes()), nil
+		case 3:
+			nPlusOne := new(big.Int).Add(curveParams.N, big.NewInt(1))
+			return copy(p, nPlusOne.Bytes()), nil
+		}
+		oneModNBytes := oneModN.Bytes()
+		return copy(p, oneModNBytes[:]), nil
+	})
+
+	// Generate a private key using the mock reader and ensure the resulting key
+	// is the expected one.  It should be the value "1" since the other values
+	// the sequence produces are invalid and thus should be rejected.
+	priv, err := GeneratePrivateKeyFromRand(mockReader)
+	if err != nil {
+		t.Errorf("failed to generate private key: %s", err)
+		return
+	}
+	if !priv.Key.Equals(oneModN) {
+		t.Fatalf("unexpected private key -- got: %x, want %x", priv.Serialize(),
+			oneModN.Bytes())
+	}
+}
+
+// TestGeneratePrivateKeyError ensures the private key generation properly
+// handles errors when attempting to read from the source of randomness.
+func TestGeneratePrivateKeyError(t *testing.T) {
+	// Create a mock reader that returns an error.
+	errDisabled := errors.New("disabled")
+	mockReader := mockPrivateKeyReaderFunc(func(p []byte) (int, error) {
+		return 0, errDisabled
+	})
+
+	// Generate a private key using the mock reader and ensure the expected
+	// error is returned.
+	_, err := GeneratePrivateKeyFromRand(mockReader)
+	if !errors.Is(err, errDisabled) {
+		t.Fatalf("mismatched err -- got %v, want %v", err, errDisabled)
+		return
+	}
+}
+
+// TestPrivKeys ensures a private key created from bytes produces both the
+// correct associated public key as well serializes back to the original bytes.
 func TestPrivKeys(t *testing.T) {
 	tests := []struct {
 		name string
-		key  []byte
-	}{
-		{
-			name: "check curve",
-			key: []byte{
-				0xea, 0xf0, 0x2c, 0xa3, 0x48, 0xc5, 0x24, 0xe6,
-				0x39, 0x26, 0x55, 0xba, 0x4d, 0x29, 0x60, 0x3c,
-				0xd1, 0xa7, 0x34, 0x7d, 0x9d, 0x65, 0xcf, 0xe9,
-				0x3c, 0xe1, 0xeb, 0xff, 0xdc, 0xa2, 0x26, 0x94,
-			},
-		},
-	}
+		priv string // hex encoded private key to test
+		pub  string // expected hex encoded serialized compressed public key
+	}{{
+		name: "random private key 1",
+		priv: "eaf02ca348c524e6392655ba4d29603cd1a7347d9d65cfe93ce1ebffdca22694",
+		pub:  "025ceeba2ab4a635df2c0301a3d773da06ac5a18a7c3e0d09a795d7e57d233edf1",
+	}, {
+		name: "random private key 2",
+		priv: "24b860d0651db83feba821e7a94ba8b87162665509cefef0cbde6a8fbbedfe7c",
+		pub:  "032a6e51bf218085647d330eac2fafaeee07617a777ad9e8e7141b4cdae92cb637",
+	}}
 
 	for _, test := range tests {
-		priv, pub := PrivKeyFromBytes(S256(), test.key)
+		// Parse test data.
+		privKeyBytes := hexToBytes(test.priv)
+		wantPubKeyBytes := hexToBytes(test.pub)
 
-		_, err := ParsePubKey(pub.SerializeUncompressed(), S256())
-		if err != nil {
-			t.Errorf("%s privkey: %v", test.name, err)
-			continue
+		priv := PrivKeyFromBytes(privKeyBytes)
+		pub := priv.PubKey()
+
+		serializedPubKey := pub.SerializeCompressed()
+		if !bytes.Equal(serializedPubKey, wantPubKeyBytes) {
+			t.Errorf("%s unexpected serialized public key - got: %x, want: %x",
+				test.name, serializedPubKey, wantPubKeyBytes)
 		}
 
-		hash := []byte{0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9}
-		sig, err := priv.Sign(hash)
-		if err != nil {
-			t.Errorf("%s could not sign: %v", test.name, err)
-			continue
+		serializedPrivKey := priv.Serialize()
+		if !bytes.Equal(serializedPrivKey, privKeyBytes) {
+			t.Errorf("%s unexpected serialized private key - got: %x, want: %x",
+				test.name, serializedPrivKey, privKeyBytes)
 		}
+	}
+}
 
-		if !sig.Verify(hash, pub) {
-			t.Errorf("%s could not verify: %v", test.name, err)
-			continue
-		}
+// TestPrivateKeyZero ensures that zeroing a private key clears the memory
+// associated with it.
+func TestPrivateKeyZero(t *testing.T) {
+	// Create a new private key and zero the initial key material that is now
+	// copied into the private key.
+	key := mustModNScalar("eaf02ca348c524e6392655ba4d29603cd1a7347d9d65cfe93ce1ebffdca22694")
+	privKey := NewPrivateKey(key)
+	key.Zero()
 
-		serializedKey := priv.Serialize()
-		if !bytes.Equal(serializedKey, test.key) {
-			t.Errorf("%s unexpected serialized bytes - got: %x, "+
-				"want: %x", test.name, serializedKey, test.key)
-		}
+	// Ensure the private key is non zero.
+	if privKey.Key.IsZero() {
+		t.Fatal("private key is zero when it should be non zero")
+	}
+
+	// Zero the private key and ensure it was properly zeroed.
+	privKey.Zero()
+	if !privKey.Key.IsZero() {
+		t.Fatal("private key is non zero when it should be zero")
 	}
 }

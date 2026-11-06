@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -30,10 +30,10 @@ type MsgAddr struct {
 
 // AddAddress adds a known active peer to the message.
 func (msg *MsgAddr) AddAddress(na *NetAddress) error {
+	const op = "MsgAddr.AddAddress"
 	if len(msg.AddrList)+1 > MaxAddrPerMsg {
-		str := fmt.Sprintf("too many addresses in message [max %v]",
-			MaxAddrPerMsg)
-		return messageError("MsgAddr.AddAddress", str)
+		msg := fmt.Sprintf("too many addresses in message [max %v]", MaxAddrPerMsg)
+		return messageError(op, ErrTooManyAddrs, msg)
 	}
 
 	msg.AddrList = append(msg.AddrList, na)
@@ -59,6 +59,13 @@ func (msg *MsgAddr) ClearAddresses() {
 // BtcDecode decodes r using the bitcoin protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgAddr) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgAddr.BtcDecode"
+	if pver >= AddrV2Version {
+		msg := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
+	}
+
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err
@@ -66,9 +73,9 @@ func (msg *MsgAddr) BtcDecode(r io.Reader, pver uint32) error {
 
 	// Limit to max addresses per message.
 	if count > MaxAddrPerMsg {
-		str := fmt.Sprintf("too many addresses for message "+
-			"[count %v, max %v]", count, MaxAddrPerMsg)
-		return messageError("MsgAddr.BtcDecode", str)
+		msg := fmt.Sprintf("too many addresses for message [count %v, max %v]",
+			count, MaxAddrPerMsg)
+		return messageError(op, ErrTooManyAddrs, msg)
 	}
 
 	addrList := make([]NetAddress, count)
@@ -87,13 +94,20 @@ func (msg *MsgAddr) BtcDecode(r io.Reader, pver uint32) error {
 // BtcEncode encodes the receiver to w using the bitcoin protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgAddr) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgAddr.BtcEncode"
+	if pver >= AddrV2Version {
+		msg := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, msg)
+	}
+
 	// Protocol versions before MultipleAddressVersion only allowed 1 address
 	// per message.
 	count := len(msg.AddrList)
 	if count > MaxAddrPerMsg {
-		str := fmt.Sprintf("too many addresses for message "+
-			"[count %v, max %v]", count, MaxAddrPerMsg)
-		return messageError("MsgAddr.BtcEncode", str)
+		msg := fmt.Sprintf("too many addresses for message [count %v, max %v]",
+			count, MaxAddrPerMsg)
+		return messageError(op, ErrTooManyAddrs, msg)
 	}
 
 	err := WriteVarInt(w, pver, uint64(count))
@@ -120,8 +134,27 @@ func (msg *MsgAddr) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgAddr) MaxPayloadLength(pver uint32) uint32 {
-	// Num addresses (varInt) + max allowed addresses.
-	return MaxVarIntPayload + (MaxAddrPerMsg * maxNetAddressPayload(pver))
+	if pver >= AddrV2Version {
+		return 0
+	}
+
+	// Num addresses (size of varInt for max address per message) + max allowed
+	// addresses * max address size.
+	return uint32(VarIntSerializeSize(MaxAddrPerMsg)) +
+		(MaxAddrPerMsg * maxNetAddressPayload)
+}
+
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgAddr) SerializeSize() int {
+	// Num addresses (varInt) + total size of the addresses.  Each network
+	// address in an addr message is serialized with a timestamp.
+	n := VarIntSerializeSize(uint64(len(msg.AddrList)))
+	for _, na := range msg.AddrList {
+		const includeTimestamp = true
+		n += na.SerializeSize(includeTimestamp)
+	}
+	return n
 }
 
 // NewMsgAddr returns a new bitcoin addr message that conforms to the

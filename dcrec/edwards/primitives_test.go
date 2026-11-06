@@ -1,4 +1,4 @@
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -19,7 +19,7 @@ func testConversionVectors() []ConversionVector {
 	r := rand.New(rand.NewSource(12345))
 
 	numCvs := 50
-	cvs := make([]ConversionVector, numCvs, numCvs)
+	cvs := make([]ConversionVector, numCvs)
 	for i := 0; i < numCvs; i++ {
 		bIn := new([32]byte)
 		for j := 0; j < fieldIntSize; j++ {
@@ -37,13 +37,16 @@ func testConversionVectors() []ConversionVector {
 }
 
 // Tested functions:
-//   EncodedBytesToBigInt
-//   BigIntToFieldElement
-//   FieldElementToEncodedBytes
-//   BigIntToEncodedBytes
-//   FieldElementToBigInt
-//   EncodedBytesToFieldElement
+//
+//   - EncodedBytesToBigInt
+//   - BigIntToFieldElement
+//   - FieldElementToEncodedBytes
+//   - BigIntToEncodedBytes
+//   - FieldElementToBigInt
+//   - EncodedBytesToFieldElement
 func TestConversion(t *testing.T) {
+	t.Parallel()
+
 	encodedNumToStrIdx := 0
 	encodedNumToStrSet := []string{
 		"20196841024736227335511321252453997055107605473446826399550527392484145048463",
@@ -154,38 +157,38 @@ func TestConversion(t *testing.T) {
 
 	for _, vector := range testConversionVectors() {
 		// Test encoding to FE --> bytes.
-		feFB := EncodedBytesToFieldElement(vector.bIn)
-		feTB := FieldElementToEncodedBytes(feFB)
+		feFB := encodedBytesToFieldElement(vector.bIn)
+		feTB := fieldElementToEncodedBytes(feFB)
 		cmp := bytes.Equal(vector.bIn[:], feTB[:])
 		if !cmp {
 			t.Fatalf("expected %v, got %v", true, cmp)
 		}
 
 		// Test encoding to big int --> FE --> bytes.
-		big := EncodedBytesToBigInt(vector.bIn)
-		fe := BigIntToFieldElement(big)
-		b := FieldElementToEncodedBytes(fe)
+		big := encodedBytesToBigInt(vector.bIn)
+		fe := bigIntToFieldElement(big)
+		b := fieldElementToEncodedBytes(fe)
 		cmp = bytes.Equal(vector.bIn[:], b[:])
 		if !cmp {
 			t.Fatalf("expected %v, got %v", true, cmp)
 		}
 
 		// Test encoding to big int --> bytes.
-		b = BigIntToEncodedBytes(big)
+		b = bigIntToEncodedBytes(big)
 		cmp = bytes.Equal(vector.bIn[:], b[:])
 		if !cmp {
 			t.Fatalf("expected %v, got %v", true, cmp)
 		}
 
 		// Test encoding FE --> big int --> bytes.
-		feBig := FieldElementToBigInt(fe)
-		b = BigIntToEncodedBytes(feBig)
+		feBig := fieldElementToBigInt(fe)
+		b = bigIntToEncodedBytes(feBig)
 		cmp = bytes.Equal(vector.bIn[:], b[:])
 		if !cmp {
 			t.Fatalf("expected %v, got %v", true, cmp)
 		}
 
-		// Asert our results.
+		// Assert our results.
 		encodedNumStr := encodedNumToStrSet[encodedNumToStrIdx]
 		cmp = encodedNumStr == big.String()
 		if !cmp {
@@ -207,7 +210,7 @@ func testPointConversionVectors() []ConversionVector {
 	r := rand.New(rand.NewSource(54321))
 
 	numCvs := 50
-	cvs := make([]ConversionVector, numCvs, numCvs)
+	cvs := make([]ConversionVector, numCvs)
 	for i := 0; i < numCvs; i++ {
 		bIn := new([32]byte)
 		for j := 0; j < fieldIntSize; j++ {
@@ -223,10 +226,13 @@ func testPointConversionVectors() []ConversionVector {
 }
 
 // Tested functions:
-//   BigIntPointToEncodedBytes
-//   extendedToBigAffine
-//   EncodedBytesToBigIntPoint
+//
+//   - BigIntPointToEncodedBytes
+//   - extendedToBigAffine
+//   - EncodedBytesToBigIntPoint
 func TestPointConversion(t *testing.T) {
+	t.Parallel()
+
 	decodedPointsIdx := 0
 	decodedPointsSet := []string{
 		"36342386295235510298682738805067969701306540594271578388800019131093341795154,12122921476001995645148951048614280991245620197289177635264906062452356396947",
@@ -285,17 +291,16 @@ func TestPointConversion(t *testing.T) {
 		"14c723f67789d320bfcccc0ff2bc8495b57b1d359d5b493aaf22df43bb65b259",
 	}
 
-	curve := new(TwistedEdwardsCurve)
-	curve.InitParam25519()
+	curve := Edwards()
 
 	for _, vector := range testPointConversionVectors() {
-		x, y, err := curve.EncodedBytesToBigIntPoint(vector.bIn)
+		x, y, err := curve.encodedBytesToBigIntPoint(vector.bIn)
 		// The random point wasn't on the curve.
 		if err != nil {
 			continue
 		}
 
-		yB := BigIntPointToEncodedBytes(x, y)
+		yB := bigIntPointToEncodedBytes(x, y)
 		cmp := bytes.Equal(vector.bIn[:], yB[:])
 		if !cmp {
 			t.Fatalf("expected %v, got %v", true, cmp)

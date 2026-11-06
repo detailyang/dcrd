@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,12 +8,12 @@ package edwards
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"crypto/sha512"
 	"fmt"
 	"math/big"
 
 	"github.com/agl/ed25519"
+	"github.com/decred/dcrd/crypto/rand"
 )
 
 // These constants define the lengths of serialized private keys.
@@ -23,7 +23,7 @@ const (
 )
 
 // PrivateKey wraps an ecdsa.PrivateKey as a convenience mainly for signing
-// things with the the private key without having to directly import the ecdsa
+// things with the private key without having to directly import the ecdsa
 // package.
 type PrivateKey struct {
 	ecPk   *ecdsa.PrivateKey
@@ -32,16 +32,16 @@ type PrivateKey struct {
 
 // NewPrivateKey instantiates a new private key from a scalar encoded as a
 // big integer.
-func NewPrivateKey(curve *TwistedEdwardsCurve, d *big.Int) *PrivateKey {
-	dArray := BigIntToEncodedBytes(d)
-	priv, _ := PrivKeyFromSecret(curve, dArray[:])
+func NewPrivateKey(d *big.Int) *PrivateKey {
+	dArray := bigIntToEncodedBytes(d)
+	priv, _ := PrivKeyFromSecret(dArray[:])
 	return priv
 }
 
 // GeneratePrivateKey is a wrapper for ecdsa.GenerateKey that returns a
 // PrivateKey instead of the normal ecdsa.PrivateKey.
-func GeneratePrivateKey(curve *TwistedEdwardsCurve) (*PrivateKey, error) {
-	key, err := ecdsa.GenerateKey(curve, rand.Reader)
+func GeneratePrivateKey() (*PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(Edwards(), rand.Reader())
 	if err != nil {
 		return nil, err
 	}
@@ -70,8 +70,7 @@ func computeScalar(privateKey *[PrivKeyBytesLen]byte) *[PrivScalarSize]byte {
 
 // PrivKeyFromBytes returns a private and public key for `curve' based on the
 // private key passed as an argument as a byte slice.
-func PrivKeyFromBytes(curve *TwistedEdwardsCurve,
-	pkBytes []byte) (*PrivateKey, *PublicKey) {
+func PrivKeyFromBytes(pkBytes []byte) (*PrivateKey, *PublicKey) {
 	if len(pkBytes) != PrivKeyBytesLen {
 		return nil, nil
 	}
@@ -83,7 +82,7 @@ func PrivKeyFromBytes(curve *TwistedEdwardsCurve,
 	// So, make sure we only grab the actual scalar we care about.
 	privKeyBytes := pk[0:32]
 	pubKeyBytes := pk[32:64]
-	pubKey, err := ParsePubKey(curve, pubKeyBytes)
+	pubKey, err := ParsePubKey(pubKeyBytes)
 	if err != nil {
 		return nil, nil
 	}
@@ -101,8 +100,7 @@ func PrivKeyFromBytes(curve *TwistedEdwardsCurve,
 
 // PrivKeyFromSecret returns a private and public key for `curve' based on the
 // 32-byte private key secret passed as an argument as a byte slice.
-func PrivKeyFromSecret(curve *TwistedEdwardsCurve, s []byte) (*PrivateKey,
-	*PublicKey) {
+func PrivKeyFromSecret(s []byte) (*PrivateKey, *PublicKey) {
 	if len(s) != PrivKeyBytesLen/2 {
 		return nil, nil
 	}
@@ -115,14 +113,13 @@ func PrivKeyFromSecret(curve *TwistedEdwardsCurve, s []byte) (*PrivateKey,
 		return nil, nil
 	}
 
-	return PrivKeyFromBytes(curve, pk[:])
+	return PrivKeyFromBytes(pk[:])
 }
 
 // PrivKeyFromScalar returns a private and public key for `curve' based on the
 // 32-byte private scalar passed as an argument as a byte slice (encoded big
 // endian int).
-func PrivKeyFromScalar(curve *TwistedEdwardsCurve, p []byte) (*PrivateKey,
-	*PublicKey, error) {
+func PrivKeyFromScalar(p []byte) (*PrivateKey, *PublicKey, error) {
 	if len(p) != PrivScalarSize {
 		return nil, nil, fmt.Errorf("bad private scalar size")
 	}
@@ -132,6 +129,7 @@ func PrivKeyFromScalar(curve *TwistedEdwardsCurve, p []byte) (*PrivateKey,
 	pk.ecPk.D = new(big.Int).SetBytes(p)
 
 	// The scalar must be in the subgroup.
+	curve := Edwards()
 	if pk.ecPk.D.Cmp(curve.N) > 0 {
 		return nil, nil, fmt.Errorf("not on subgroup (>N)")
 	}
@@ -156,6 +154,11 @@ func PrivKeyFromScalar(curve *TwistedEdwardsCurve, p []byte) (*PrivateKey,
 // Public returns the PublicKey corresponding to this private key.
 func (p PrivateKey) Public() (*big.Int, *big.Int) {
 	return p.ecPk.PublicKey.X, p.ecPk.PublicKey.Y
+}
+
+// PubKey returns the PublicKey corresponding to this private key.
+func (p *PrivateKey) PubKey() *PublicKey {
+	return (*PublicKey)(&p.ecPk.PublicKey)
 }
 
 // ToECDSA returns the private key as a *ecdsa.PrivateKey.
@@ -184,11 +187,35 @@ func (p PrivateKey) SerializeSecret() []byte {
 
 	// This is little endian.
 	pubX, pubY := p.Public()
-	spk := BigIntPointToEncodedBytes(pubX, pubY)
+	spk := bigIntPointToEncodedBytes(pubX, pubY)
 
 	all := append(p.secret[:], spk[:]...)
 
 	return all
+}
+
+// Sign is the generalized and exported version of Ed25519 signing, that
+// handles both standard private secrets and non-standard scalars.
+func (p PrivateKey) Sign(hash []byte) (*Signature, error) {
+	if hash == nil {
+		return nil, fmt.Errorf("message key is nil")
+	}
+
+	var r, s *big.Int
+	var err error
+	if p.secret == nil {
+		privLE := copyBytes(p.Serialize())
+		reverse(privLE)
+		nonce := nonceRFC6979(privLE[:], hash, nil, nil)
+		r, s, err = SignFromScalar(&p, nonce, hash)
+	} else {
+		r, s, err = SignFromSecretNoReader(&p, hash)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return NewSignature(r, s), nil
 }
 
 // GetD satisfies the chainec PrivateKey interface.

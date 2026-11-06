@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,13 +8,15 @@ package tickettreap
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"math/rand"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/chaincfg/v3"
 )
 
 // assertPanic tests that code correctly panics, and will raise a testing error
@@ -23,6 +25,27 @@ func assertPanic(t *testing.T, f func()) {
 	defer func() {
 		if r := recover(); r == nil {
 			t.Errorf("The code did not panic")
+		}
+	}()
+	f()
+}
+
+// assertPanicMsg tests that the function parameter panics with a message that
+// contains the provided string, and will raise a testing error otherwise.
+func assertPanicMsg(t *testing.T, want string, f func()) {
+	t.Helper()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Errorf("The code did not panic")
+			return
+		}
+
+		got := fmt.Sprint(r)
+		if !strings.Contains(got, want) {
+			t.Errorf("Unexpected panic message - got %q, want it to contain %q",
+				got, want)
 		}
 	}()
 	f()
@@ -98,7 +121,7 @@ func TestImmutableSequential(t *testing.T) {
 
 	// Insert a bunch of sequential keys while checking several of the treap
 	// functions work as expected.
-	expectedSize := uint64(0)
+	var expectedSize uint64
 	numItems := 1000
 	testTreap := NewImmutable()
 	for i := 0; i < numItems; i++ {
@@ -125,7 +148,7 @@ func TestImmutableSequential(t *testing.T) {
 		}
 
 		// Ensure the expected size is reported.
-		expectedSize += (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize += nodeFieldsSize + uint64(len(key)) + nodeValueSize
 		if gotSize := testTreap.Size(); gotSize != expectedSize {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
@@ -144,9 +167,15 @@ func TestImmutableSequential(t *testing.T) {
 		}
 	}
 
-	// assert panic for GetByIndex out of bounds
-	assertPanic(t, func() {
+	// assert panic for GetByIndex out of bounds.
+	assertPanicMsg(t, "index out of bounds", func() {
 		testTreap.GetByIndex(numItems)
+	})
+	assertPanicMsg(t, "index out of bounds", func() {
+		testTreap.GetByIndex(numItems + 1)
+	})
+	assertPanicMsg(t, "index out of bounds", func() {
+		testTreap.GetByIndex(-1)
 	})
 
 	if !testTreap.root.isHeap() {
@@ -254,7 +283,7 @@ func TestImmutableSequential(t *testing.T) {
 		}
 
 		// Ensure the expected size is reported.
-		expectedSize -= (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize -= nodeFieldsSize + uint64(len(key)) + nodeValueSize
 		if gotSize := testTreap.Size(); gotSize != expectedSize {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
@@ -269,7 +298,7 @@ func TestImmutableReverseSequential(t *testing.T) {
 
 	// Insert a bunch of sequential keys while checking several of the treap
 	// functions work as expected.
-	expectedSize := uint64(0)
+	var expectedSize uint64
 	numItems := 1000
 	testTreap := NewImmutable()
 	for i := 0; i < numItems; i++ {
@@ -296,7 +325,7 @@ func TestImmutableReverseSequential(t *testing.T) {
 		}
 
 		// Ensure the expected size is reported.
-		expectedSize += (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize += nodeFieldsSize + uint64(len(key)) + nodeValueSize
 		if gotSize := testTreap.Size(); gotSize != expectedSize {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
@@ -364,7 +393,7 @@ func TestImmutableReverseSequential(t *testing.T) {
 		}
 
 		// Ensure the expected size is reported.
-		expectedSize -= (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize -= nodeFieldsSize + uint64(len(key)) + nodeValueSize
 		if gotSize := testTreap.Size(); gotSize != expectedSize {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
@@ -373,13 +402,13 @@ func TestImmutableReverseSequential(t *testing.T) {
 }
 
 // TestImmutableUnordered ensures that putting keys into an immutable treap in
-// no paritcular order works as expected.
+// no particular order works as expected.
 func TestImmutableUnordered(t *testing.T) {
 	t.Parallel()
 
 	// Insert a bunch of out-of-order keys while checking several of the
 	// treap functions work as expected.
-	expectedSize := uint64(0)
+	var expectedSize uint64
 	numItems := 1000
 	testTreap := NewImmutable()
 	for i := 0; i < numItems; i++ {
@@ -440,7 +469,7 @@ func TestImmutableUnordered(t *testing.T) {
 		}
 
 		// Ensure the expected size is reported.
-		expectedSize -= (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize -= nodeFieldsSize + uint64(len(key)) + nodeValueSize
 		if gotSize := testTreap.Size(); gotSize != expectedSize {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
@@ -454,7 +483,7 @@ func TestImmutableDuplicatePut(t *testing.T) {
 	t.Parallel()
 
 	expectedVal := &Value{Height: 10000}
-	expectedSize := uint64(0)
+	var expectedSize uint64
 	numItems := 1000
 	testTreap := NewImmutable()
 	for i := 0; i < numItems; i++ {
@@ -463,7 +492,7 @@ func TestImmutableDuplicatePut(t *testing.T) {
 		testTreap = testTreap.Put(key, value)
 		expectedSize += nodeFieldsSize + uint64(len(key)) + nodeValueSize
 
-		// Put a duplicate key with the the expected final value.
+		// Put a duplicate key with the expected final value.
 		testTreap = testTreap.Put(key, expectedVal)
 
 		// Ensure the key still exists and is the new value.
@@ -538,7 +567,7 @@ func TestImmutableSnapshot(t *testing.T) {
 
 	// Insert a bunch of sequential keys while checking several of the treap
 	// functions work as expected.
-	expectedSize := uint64(0)
+	var expectedSize uint64
 	numItems := 1000
 	testTreap := NewImmutable()
 	for i := 0; i < numItems; i++ {
@@ -572,7 +601,7 @@ func TestImmutableSnapshot(t *testing.T) {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
 		}
-		expectedSize += (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize += nodeFieldsSize + uint64(len(key)) + nodeValueSize
 	}
 
 	// Delete the keys one-by-one while checking several of the treap
@@ -608,7 +637,7 @@ func TestImmutableSnapshot(t *testing.T) {
 			t.Fatalf("Size #%d: unexpected byte size - got %d, "+
 				"want %d", i, gotSize, expectedSize)
 		}
-		expectedSize -= (nodeFieldsSize + uint64(len(key)) + nodeValueSize)
+		expectedSize -= nodeFieldsSize + uint64(len(key)) + nodeValueSize
 	}
 }
 
@@ -628,12 +657,11 @@ func randHash(r rand.Source) *chainhash.Hash {
 
 // pickRandWinners picks tickets per block many random "winners" and returns
 // their indexes.
-func pickRandWinners(sz int, r rand.Source) []int {
+func pickRandWinners(sz int, r rand.Source, perBlock int) []int {
 	if sz == 0 {
 		panic("bad sz!")
 	}
 
-	perBlock := int(chaincfg.MainNetParams.TicketsPerBlock)
 	winners := make([]int, perBlock)
 	for i := 0; i < perBlock; i++ {
 		winners[i] = int(r.Int63() % int64(sz))
@@ -672,6 +700,7 @@ func TestImmutableMemory(t *testing.T) {
 	// Start populating the "nodes". Ignore expiring tickets for the
 	// sake of testing. For each node, remove 5 "random" tickets and
 	// insert 5 "random" tickets.
+	perBlock := int(chaincfg.MainNetParams().TicketsPerBlock)
 	maxHeight := uint32(0xFFFFFFFF)
 	lastTreap := nodeTreaps[0]
 	lastTotal := initTotal
@@ -679,14 +708,13 @@ func TestImmutableMemory(t *testing.T) {
 	for i := 1; i < numNodes; i++ {
 		treapCopy := lastTreap
 		sz := treapCopy.Len()
-		winnerIdxs := pickRandWinners(sz, randSource)
+		winnerIdxs := pickRandWinners(sz, randSource, perBlock)
 		winners, _ := treapCopy.FetchWinnersAndExpired(winnerIdxs, maxHeight)
 		for _, k := range winners {
 			treapCopy = treapCopy.Delete(*k)
 		}
 
-		perBlock := int(chaincfg.MainNetParams.TicketsPerBlock)
-		for i := 0; i < perBlock; i++ {
+		for j := 0; j < perBlock; j++ {
 			randomHash := randHash(randSource)
 			treapCopy = treapCopy.Put(Key(*randomHash),
 				&Value{uint32(randSource.Int63()), false, true, false, true})

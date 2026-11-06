@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -12,11 +12,20 @@ import (
 	"strconv"
 
 	"github.com/decred/dcrd/chaincfg/chainhash"
+	"github.com/decred/dcrd/crypto/blake256"
 )
 
 const (
-	// TxVersion is the current latest supported transaction version.
+	// TxVersion is the initial transaction version.
 	TxVersion uint16 = 1
+
+	// TxVersionSeqLock is the transaction version that enables sequence
+	// locks.
+	TxVersionSeqLock uint16 = 2
+
+	// TxVersionTreasury is the transaction version that enables the
+	// decentralized treasury features.
+	TxVersionTreasury uint16 = 3
 
 	// MaxTxInSequenceNum is the maximum sequence number the sequence field
 	// of a transaction input can be.
@@ -118,8 +127,8 @@ const (
 	minTxPayload = 4 + 1 + 1 + 1 + 4 + 4
 
 	// freeListMaxScriptSize is the size of each buffer in the free list
-	// that	is used for deserializing scripts from the wire before they are
-	// concatenated into a single contiguous buffers.  This value was chosen
+	// that is used for deserializing scripts from the wire before they are
+	// concatenated into a single contiguous buffer.  This value was chosen
 	// because it is slightly more than twice the size of the vast majority
 	// of all "standard" scripts.  Larger scripts are still deserialized
 	// properly as the free list will simply be bypassed for them.
@@ -148,14 +157,6 @@ const (
 	// TxSerializeOnlyWitness indicates a transaction be serialized with
 	// only the witness data.
 	TxSerializeOnlyWitness
-
-	// TxSerializeWitnessSigning indicates a transaction be serialized with
-	// only the witness scripts.
-	TxSerializeWitnessSigning
-
-	// TxSerializeWitnessValueSigning indicates a transaction be serialized
-	// with only the witness input values and scripts.
-	TxSerializeWitnessValueSigning
 )
 
 // scriptFreeList defines a free list of byte slices (up to the maximum number
@@ -177,7 +178,7 @@ type scriptFreeList chan []byte
 // ignored and allowed to go the garbage collector.
 func (c scriptFreeList) Borrow(size uint64) []byte {
 	if size > freeListMaxScriptSize {
-		return make([]byte, size, size)
+		return make([]byte, size)
 	}
 
 	var buf []byte
@@ -219,10 +220,11 @@ var scriptPool scriptFreeList = make(chan []byte, freeListMaxItems)
 // script.  It is encoded as a varInt containing the length of the array
 // followed by the bytes themselves.  An error is returned if the length is
 // greater than the passed maxAllowed parameter which helps protect against
-// memory exhuastion attacks and forced panics thorugh malformed messages.  The
+// memory exhaustion attacks and forced panics through malformed messages.  The
 // fieldName parameter is only used for the error message so it provides more
 // context in the error.
 func readScript(r io.Reader, pver uint32, maxAllowed uint32, fieldName string) ([]byte, error) {
+	const op = "readScript"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return nil, err
@@ -232,21 +234,41 @@ func readScript(r io.Reader, pver uint32, maxAllowed uint32, fieldName string) (
 	// be possible to cause memory exhaustion and panics without a sane
 	// upper bound on this count.
 	if count > uint64(maxAllowed) {
-		str := fmt.Sprintf("%s is larger than the max allowed size "+
+		msg := fmt.Sprintf("%s is larger than the max allowed size "+
 			"[count %d, max %d]", fieldName, count, maxAllowed)
-		return nil, messageError("readScript", str)
+		return nil, messageError(op, ErrVarBytesTooLong, msg)
 	}
 
-	b := scriptPool.Borrow(count)
-	_, err = io.ReadFull(r, b)
-	if err != nil {
-		scriptPool.Return(b)
-		return nil, err
+	switch r := r.(type) {
+	// Read the script bytes from the underlying buffer when called by
+	// ReadMessageN.  This requires that the buffer will not be reset or
+	// truncated in the future (which is not a guarantee that can be made
+	// for any bytes.Buffer passed to BtcDecode).
+	case *wireBuffer:
+		b := r.Next(int(count))
+		if count != 0 && len(b) == 0 {
+			return nil, io.EOF
+		}
+		if len(b) < int(count) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		return b, nil
+
+	// In all other cases, borrow a temporary buffer from the scriptPool
+	// freelist (before copying all scripts to a single contiguous
+	// allocation and returning buffers back to the pool).
+	default:
+		b := scriptPool.Borrow(count)
+		_, err = io.ReadFull(r, b)
+		if err != nil {
+			scriptPool.Return(b)
+			return nil, err
+		}
+		return b, nil
 	}
-	return b, nil
 }
 
-// OutPoint defines a decred data type that is used to track previous
+// OutPoint defines a Decred data type that is used to track previous
 // transaction outputs.
 type OutPoint struct {
 	Hash  chainhash.Hash
@@ -254,7 +276,7 @@ type OutPoint struct {
 	Tree  int8
 }
 
-// NewOutPoint returns a new decred transaction outpoint point with the
+// NewOutPoint returns a new Decred transaction outpoint point with the
 // provided hash and index.
 func NewOutPoint(hash *chainhash.Hash, index uint32, tree int8) *OutPoint {
 	return &OutPoint{
@@ -279,7 +301,7 @@ func (o OutPoint) String() string {
 	return string(buf)
 }
 
-// TxIn defines a decred transaction input.
+// TxIn defines a Decred transaction input.
 type TxIn struct {
 	// Non-witness
 	PreviousOutPoint OutPoint
@@ -310,40 +332,21 @@ func (t *TxIn) SerializeSizeWitness() int {
 		len(t.SignatureScript)
 }
 
-// SerializeSizeWitnessSigning returns the number of bytes it would take to
-// serialize the transaction input for a witness used in signing.
-func (t *TxIn) SerializeSizeWitnessSigning() int {
-	// Serialized varint size for the length of SignatureScript +
-	// SignatureScript bytes.
-	return VarIntSerializeSize(uint64(len(t.SignatureScript))) +
-		len(t.SignatureScript)
-}
-
-// SerializeSizeWitnessValueSigning returns the number of bytes it would take to
-// serialize the transaction input for a witness used in signing with value
-// included.
-func (t *TxIn) SerializeSizeWitnessValueSigning() int {
-	// ValueIn (8 bytes) + serialized varint size for the length of
-	// SignatureScript + SignatureScript bytes.
-	return 8 + VarIntSerializeSize(uint64(len(t.SignatureScript))) +
-		len(t.SignatureScript)
-}
-
-// NewTxIn returns a new decred transaction input with the provided
+// NewTxIn returns a new Decred transaction input with the provided
 // previous outpoint point and signature script with a default sequence of
 // MaxTxInSequenceNum.
-func NewTxIn(prevOut *OutPoint, signatureScript []byte) *TxIn {
+func NewTxIn(prevOut *OutPoint, valueIn int64, signatureScript []byte) *TxIn {
 	return &TxIn{
 		PreviousOutPoint: *prevOut,
 		Sequence:         MaxTxInSequenceNum,
 		SignatureScript:  signatureScript,
-		ValueIn:          NullValueIn,
+		ValueIn:          valueIn,
 		BlockHeight:      NullBlockHeight,
 		BlockIndex:       NullBlockIndex,
 	}
 }
 
-// TxOut defines a decred transaction output.
+// TxOut defines a Decred transaction output.
 type TxOut struct {
 	Value    int64
 	Version  uint16
@@ -351,14 +354,14 @@ type TxOut struct {
 }
 
 // SerializeSize returns the number of bytes it would take to serialize the
-// the transaction output.
+// transaction output.
 func (t *TxOut) SerializeSize() int {
 	// Value 8 bytes + Version 2 bytes + serialized varint size for
 	// the length of PkScript + PkScript bytes.
 	return 8 + 2 + VarIntSerializeSize(uint64(len(t.PkScript))) + len(t.PkScript)
 }
 
-// NewTxOut returns a new decred transaction output with the provided
+// NewTxOut returns a new Decred transaction output with the provided
 // transaction value and public key script.
 func NewTxOut(value int64, pkScript []byte) *TxOut {
 	return &TxOut{
@@ -368,7 +371,7 @@ func NewTxOut(value int64, pkScript []byte) *TxOut {
 	}
 }
 
-// MsgTx implements the Message interface and represents a decred tx message.
+// MsgTx implements the Message interface and represents a Decred tx message.
 // It is used to deliver transaction information in response to a getdata
 // message (MsgGetData) for a given transaction.
 //
@@ -381,7 +384,7 @@ type MsgTx struct {
 	TxIn       []*TxIn
 	TxOut      []*TxOut
 	LockTime   uint32
-	Expiry     uint32
+	Expiry     uint32 // In blocks
 }
 
 // AddTxIn adds a transaction input to the message.
@@ -409,24 +412,28 @@ func (msg *MsgTx) serialize(serType TxSerializeType) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// mustSerialize returns the serialization of the transaction for the provided
-// serialization type without modifying the original transaction.  It will panic
-// if any errors occur.
-func (msg *MsgTx) mustSerialize(serType TxSerializeType) []byte {
-	serialized, err := msg.serialize(serType)
+// mustHash returns the hash of the transaction for the provided
+// serialization type without modifying the original transaction.
+// It will panic if serialization fails.
+func (msg *MsgTx) mustHash(hasher *blake256.Hasher256, serType TxSerializeType) chainhash.Hash {
+	// Shallow copy so the serialization type can be changed without
+	// modifying the original transaction.
+	mtxCopy := *msg
+	mtxCopy.SerType = serType
+	err := mtxCopy.Serialize(hasher)
 	if err != nil {
 		panic(fmt.Sprintf("MsgTx failed serializing for type %v",
 			serType))
 	}
-	return serialized
+	return hasher.Sum256()
 }
 
-// TxHash generates the hash for the transaction prefix.  Since it does not
-// contain any witness data, it is not malleable and therefore is stable for
-// use in unconfirmed transaction chains.
+// TxHash generates the BLAKE-256 hash for the transaction prefix.  Since it
+// does not contain any witness data, it is not malleable and therefore is
+// stable for use in unconfirmed transaction chains.
 func (msg *MsgTx) TxHash() chainhash.Hash {
 	// TxHash should always calculate a non-witnessed hash.
-	return chainhash.HashH(msg.mustSerialize(TxSerializeNoWitness))
+	return msg.mustHash(blake256.NewHasher256(), TxSerializeNoWitness)
 }
 
 // CachedTxHash is equivalent to calling TxHash, however it caches the result so
@@ -451,43 +458,29 @@ func (msg *MsgTx) RecacheTxHash() *chainhash.Hash {
 	return msg.CachedHash
 }
 
-// TxHashWitness generates the hash for the transaction witness.
+// TxHashWitness generates the BLAKE-256 hash for the transaction witness.
 func (msg *MsgTx) TxHashWitness() chainhash.Hash {
 	// TxHashWitness should always calculate a witnessed hash.
-	return chainhash.HashH(msg.mustSerialize(TxSerializeOnlyWitness))
+	return msg.mustHash(blake256.NewHasher256(), TxSerializeOnlyWitness)
 }
 
-// TxHashWitnessSigning generates the hash for the transaction witness with the
-// malleable portions (AmountIn, BlockHeight, BlockIndex) removed.  These are
-// verified and set by the miner instead.
-func (msg *MsgTx) TxHashWitnessSigning() chainhash.Hash {
-	return chainhash.HashH(msg.mustSerialize(TxSerializeWitnessSigning))
-}
-
-// TxHashWitnessValueSigning generates the hash for the transaction witness with
-// BlockHeight and BlockIndex removed, allowing the signer to specify the
-// ValueIn.
-func (msg *MsgTx) TxHashWitnessValueSigning() chainhash.Hash {
-	return chainhash.HashH(msg.mustSerialize(TxSerializeWitnessValueSigning))
-}
-
-// TxHashFull generates the hash for the transaction prefix || witness. It first
-// obtains the hashes for both the transaction prefix and witness, then
-// concatenates them and hashes the result.
+// TxHashFull generates the hash for the transaction prefix || witness.  This
+// is the BLAKE-256 hash of the concatenation of the individual prefix and
+// witness hashes (and not the hash of the full serialization).
 func (msg *MsgTx) TxHashFull() chainhash.Hash {
-	// Note that the inputs to the hashes, the serialized prefix and
-	// witness, have different serialized versions because the serialized
-	// encoding of the version includes the real transaction version in the
-	// lower 16 bits and the transaction serialization type in the upper 16
-	// bits.  The real transaction version (lower 16 bits) will be the same
-	// in both serializations.
-	concat := make([]byte, chainhash.HashSize*2)
-	prefixHash := msg.TxHash()
-	witnessHash := msg.TxHashWitness()
-	copy(concat[0:], prefixHash[:])
-	copy(concat[chainhash.HashSize:], witnessHash[:])
+	// Even for a transaction that has neither prefix nor witness (and
+	// would otherwise hash to the same result), the prefix and witness
+	// hashes will still differ due to the serialization type being
+	// encoded into the upper 16 bits of the transaction version.
+	hasher := blake256.NewHasher256()
+	prefixHash := msg.mustHash(hasher, TxSerializeNoWitness)
+	hasher.Reset()
+	witnessHash := msg.mustHash(hasher, TxSerializeOnlyWitness)
+	hasher.Reset()
 
-	return chainhash.HashH(concat)
+	hasher.WriteBytes(prefixHash[:])
+	hasher.WriteBytes(witnessHash[:])
+	return hasher.Sum256()
 }
 
 // Copy creates a deep copy of a transaction so that the original does not get
@@ -518,7 +511,7 @@ func (msg *MsgTx) Copy() *MsgTx {
 		oldScript := oldTxIn.SignatureScript
 		oldScriptLen := len(oldScript)
 		if oldScriptLen > 0 {
-			newScript = make([]byte, oldScriptLen, oldScriptLen)
+			newScript = make([]byte, oldScriptLen)
 			copy(newScript, oldScript[:oldScriptLen])
 		}
 
@@ -542,7 +535,7 @@ func (msg *MsgTx) Copy() *MsgTx {
 		oldScript := oldTxOut.PkScript
 		oldScriptLen := len(oldScript)
 		if oldScriptLen > 0 {
-			newScript = make([]byte, oldScriptLen, oldScriptLen)
+			newScript = make([]byte, oldScriptLen)
 			copy(newScript, oldScript[:oldScriptLen])
 		}
 
@@ -627,10 +620,6 @@ func writeTxScriptsToMsgTx(msg *MsgTx, totalScriptSize uint64, serType TxSeriali
 		writeTxOuts()
 	case TxSerializeOnlyWitness:
 		fallthrough
-	case TxSerializeWitnessSigning:
-		fallthrough
-	case TxSerializeWitnessValueSigning:
-		writeTxIns()
 	case TxSerializeFull:
 		writeTxIns()
 		writeTxOuts()
@@ -640,6 +629,7 @@ func writeTxScriptsToMsgTx(msg *MsgTx, totalScriptSize uint64, serType TxSeriali
 // decodePrefix decodes a transaction prefix and stores the contents
 // in the embedded msgTx.
 func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
+	const op = "MsgTx.decodePrefix"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return 0, err
@@ -649,10 +639,9 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 	// message.  It would be possible to cause memory exhaustion and panics
 	// without a sane upper bound on this count.
 	if count > uint64(maxTxInPerMessage) {
-		str := fmt.Sprintf("too many input transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxInPerMessage)
-		return 0, messageError("MsgTx.decodePrefix", str)
+		msg := fmt.Sprintf("too many input transactions to fit into max "+
+			"message size [count %d, max %d]", count, maxTxInPerMessage)
+		return 0, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// TxIns.
@@ -678,10 +667,9 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 	// message.  It would be possible to cause memory exhaustion and panics
 	// without a sane upper bound on this count.
 	if count > uint64(maxTxOutPerMessage) {
-		str := fmt.Sprintf("too many output transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxOutPerMessage)
-		return 0, messageError("MsgTx.decodePrefix", str)
+		msg := fmt.Sprintf("too many output transactions to fit into "+
+			"max message size [count %d, max %d]", count, maxTxOutPerMessage)
+		return 0, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// TxOuts.
@@ -701,12 +689,12 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 	}
 
 	// Locktime and expiry.
-	msg.LockTime, err = binarySerializer.Uint32(r, littleEndian)
+	err = readUint32LE(r, &msg.LockTime)
 	if err != nil {
 		return 0, err
 	}
 
-	msg.Expiry, err = binarySerializer.Uint32(r, littleEndian)
+	err = readUint32LE(r, &msg.Expiry)
 	if err != nil {
 		return 0, err
 	}
@@ -715,6 +703,8 @@ func (msg *MsgTx) decodePrefix(r io.Reader, pver uint32) (uint64, error) {
 }
 
 func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, error) {
+	const op = "MsgTx.decodeWitness"
+
 	// Witness only; generate the TxIn list and fill out only the
 	// sigScripts.
 	var totalScriptSize uint64
@@ -729,9 +719,8 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 		// without a sane upper bound on this count.
 		if count > uint64(maxTxInPerMessage) {
 			str := fmt.Sprintf("too many input transactions to fit into "+
-				"max message size [count %d, max %d]", count,
-				maxTxInPerMessage)
-			return 0, messageError("MsgTx.decodeWitness", str)
+				"max message size [count %d, max %d]", count, maxTxInPerMessage)
+			return 0, messageError(op, ErrTooManyTxs, str)
 		}
 
 		txIns := make([]TxIn, count)
@@ -761,20 +750,18 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 		// Don't allow the deserializer to panic by accessing memory
 		// that doesn't exist.
 		if int(count) != len(msg.TxIn) {
-			str := fmt.Sprintf("non equal witness and prefix txin quantities "+
-				"(witness %v, prefix %v)", count,
-				len(msg.TxIn))
-			return 0, messageError("MsgTx.decodeWitness", str)
+			msg := fmt.Sprintf("non equal witness and prefix txin quantities "+
+				"(witness %v, prefix %v)", count, len(msg.TxIn))
+			return 0, messageError(op, ErrMismatchedWitnessCount, msg)
 		}
 
 		// Prevent more input transactions than could possibly fit into a
 		// message.  It would be possible to cause memory exhaustion and panics
 		// without a sane upper bound on this count.
 		if count > uint64(maxTxInPerMessage) {
-			str := fmt.Sprintf("too many input transactions to fit into "+
-				"max message size [count %d, max %d]", count,
-				maxTxInPerMessage)
-			return 0, messageError("MsgTx.decodeWitness", str)
+			msg := fmt.Sprintf("too many input transactions to fit into "+
+				"max message size [count %d, max %d]", count, maxTxInPerMessage)
+			return 0, messageError(op, ErrTooManyTxs, msg)
 		}
 
 		// Read in the witnesses, and copy them into the already generated
@@ -798,96 +785,36 @@ func (msg *MsgTx) decodeWitness(r io.Reader, pver uint32, isFull bool) (uint64, 
 	return totalScriptSize, nil
 }
 
-// decodeWitnessSigning decodes a witness for signing.
-func (msg *MsgTx) decodeWitnessSigning(r io.Reader, pver uint32) (uint64, error) {
-	// Witness only for signing; generate the TxIn list and fill out only the
-	// sigScripts.
-	count, err := ReadVarInt(r, pver)
-	if err != nil {
-		return 0, err
-	}
-
-	// Prevent more input transactions than could possibly fit into a
-	// message.  It would be possible to cause memory exhaustion and panics
-	// without a sane upper bound on this count.
-	if count > uint64(maxTxInPerMessage) {
-		str := fmt.Sprintf("too many input transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxInPerMessage)
-		return 0, messageError("MsgTx.decodeWitness", str)
-	}
-
-	var totalScriptSize uint64
-	txIns := make([]TxIn, count)
-	msg.TxIn = make([]*TxIn, count)
-	for i := uint64(0); i < count; i++ {
-		// The pointer is set now in case a script buffer is borrowed
-		// and needs to be returned to the pool on error.
-		ti := &txIns[i]
-		msg.TxIn[i] = ti
-		err = readTxInWitnessSigning(r, pver, msg.Version, ti)
-		if err != nil {
-			return 0, err
-		}
-		totalScriptSize += uint64(len(ti.SignatureScript))
-	}
-	msg.TxOut = make([]*TxOut, 0)
-
-	return totalScriptSize, nil
-}
-
-// decodeWitnessValueSigning decodes a witness for signing with value.
-func (msg *MsgTx) decodeWitnessValueSigning(r io.Reader, pver uint32) (uint64, error) {
-	// Witness only for signing; generate the TxIn list and fill out only the
-	// sigScripts.
-	count, err := ReadVarInt(r, pver)
-	if err != nil {
-		return 0, err
-	}
-
-	// Prevent more input transactions than could possibly fit into a
-	// message.  It would be possible to cause memory exhaustion and panics
-	// without a sane upper bound on this count.
-	if count > uint64(maxTxInPerMessage) {
-		str := fmt.Sprintf("too many input transactions to fit into "+
-			"max message size [count %d, max %d]", count,
-			maxTxInPerMessage)
-		return 0, messageError("MsgTx.decodeWitness", str)
-	}
-
-	var totalScriptSize uint64
-	txIns := make([]TxIn, count)
-	msg.TxIn = make([]*TxIn, count)
-	for i := uint64(0); i < count; i++ {
-		// The pointer is set now in case a script buffer is borrowed
-		// and needs to be returned to the pool on error.
-		ti := &txIns[i]
-		msg.TxIn[i] = ti
-		err = readTxInWitnessValueSigning(r, pver, msg.Version, ti)
-		if err != nil {
-			return 0, err
-		}
-		totalScriptSize += uint64(len(ti.SignatureScript))
-	}
-	msg.TxOut = make([]*TxOut, 0)
-
-	return totalScriptSize, nil
-}
-
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 // See Deserialize for decoding transactions stored to disk, such as in a
 // database, as opposed to decoding transactions from the wire.
 func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgTx.BtcDecode"
+
 	// The serialized encoding of the version includes the real transaction
 	// version in the lower 16 bits and the transaction serialization type
 	// in the upper 16 bits.
-	version, err := binarySerializer.Uint32(r, littleEndian)
+	var version uint32
+	err := readUint32LE(r, &version)
 	if err != nil {
 		return err
 	}
 	msg.Version = uint16(version & 0xffff)
 	msg.SerType = TxSerializeType(version >> 16)
+
+	var copyScripts bool
+	switch r.(type) {
+	case *wireBuffer:
+		copyScripts = false
+	default:
+		copyScripts = true
+
+		// Prevent caller-provided script slices from being returned to the free
+		// list.
+		msg.TxIn = nil
+		msg.TxOut = nil
+	}
 
 	// returnScriptBuffers is a closure that returns any script buffers that
 	// were borrowed from the pool when there are any deserialization
@@ -895,6 +822,9 @@ func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
 	// replaces the scripts with the location in a contiguous buffer and
 	// returns them.
 	returnScriptBuffers := func() {
+		if !copyScripts {
+			return
+		}
 		for _, txIn := range msg.TxIn {
 			if txIn == nil || txIn.SignatureScript == nil {
 				continue
@@ -922,7 +852,9 @@ func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
 			returnScriptBuffers()
 			return err
 		}
-		writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
+		if copyScripts {
+			writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
+		}
 
 	case TxSerializeOnlyWitness:
 		totalScriptSize, err := msg.decodeWitness(r, pver, false)
@@ -930,23 +862,9 @@ func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
 			returnScriptBuffers()
 			return err
 		}
-		writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
-
-	case TxSerializeWitnessSigning:
-		totalScriptSize, err := msg.decodeWitnessSigning(r, pver)
-		if err != nil {
-			returnScriptBuffers()
-			return err
+		if copyScripts {
+			writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
 		}
-		writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
-
-	case TxSerializeWitnessValueSigning:
-		totalScriptSize, err := msg.decodeWitnessValueSigning(r, pver)
-		if err != nil {
-			returnScriptBuffers()
-			return err
-		}
-		writeTxScriptsToMsgTx(msg, totalScriptSize, txSerType)
 
 	case TxSerializeFull:
 		totalScriptSizeIns, err := msg.decodePrefix(r, pver)
@@ -959,11 +877,13 @@ func (msg *MsgTx) BtcDecode(r io.Reader, pver uint32) error {
 			returnScriptBuffers()
 			return err
 		}
-		writeTxScriptsToMsgTx(msg, totalScriptSizeIns+
-			totalScriptSizeOuts, txSerType)
+		if copyScripts {
+			writeTxScriptsToMsgTx(msg, totalScriptSizeIns+
+				totalScriptSizeOuts, txSerType)
+		}
 
 	default:
-		return messageError("MsgTx.BtcDecode", "unsupported transaction type")
+		return messageError(op, ErrUnknownTxType, "unsupported transaction type")
 	}
 
 	return nil
@@ -1020,12 +940,11 @@ func (msg *MsgTx) encodePrefix(w io.Writer, pver uint32) error {
 		}
 	}
 
-	err = binarySerializer.PutUint32(w, littleEndian, msg.LockTime)
+	err = writeUint32LE(w, msg.LockTime)
 	if err != nil {
 		return err
 	}
-
-	return binarySerializer.PutUint32(w, littleEndian, msg.Expiry)
+	return writeUint32LE(w, msg.Expiry)
 }
 
 // encodeWitness encodes a transaction witness into a writer.
@@ -1046,43 +965,6 @@ func (msg *MsgTx) encodeWitness(w io.Writer, pver uint32) error {
 	return nil
 }
 
-// encodeWitnessSigning encodes a transaction witness into a writer for signing.
-func (msg *MsgTx) encodeWitnessSigning(w io.Writer, pver uint32) error {
-	count := uint64(len(msg.TxIn))
-	err := WriteVarInt(w, pver, count)
-	if err != nil {
-		return err
-	}
-
-	for _, ti := range msg.TxIn {
-		err = writeTxInWitnessSigning(w, pver, msg.Version, ti)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// encodeWitnessValueSigning encodes a transaction witness into a writer for
-// signing, with the value included.
-func (msg *MsgTx) encodeWitnessValueSigning(w io.Writer, pver uint32) error {
-	count := uint64(len(msg.TxIn))
-	err := WriteVarInt(w, pver, count)
-	if err != nil {
-		return err
-	}
-
-	for _, ti := range msg.TxIn {
-		err = writeTxInWitnessValueSigning(w, pver, msg.Version, ti)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
 // BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 // See Serialize for encoding transactions to be stored to disk, such as in a
@@ -1092,7 +974,7 @@ func (msg *MsgTx) BtcEncode(w io.Writer, pver uint32) error {
 	// version in the lower 16 bits and the transaction serialization type
 	// in the upper 16 bits.
 	serializedVersion := uint32(msg.Version) | uint32(msg.SerType)<<16
-	err := binarySerializer.PutUint32(w, littleEndian, serializedVersion)
+	err := writeUint32LE(w, serializedVersion)
 	if err != nil {
 		return err
 	}
@@ -1110,18 +992,6 @@ func (msg *MsgTx) BtcEncode(w io.Writer, pver uint32) error {
 			return err
 		}
 
-	case TxSerializeWitnessSigning:
-		err := msg.encodeWitnessSigning(w, pver)
-		if err != nil {
-			return err
-		}
-
-	case TxSerializeWitnessValueSigning:
-		err := msg.encodeWitnessValueSigning(w, pver)
-		if err != nil {
-			return err
-		}
-
 	case TxSerializeFull:
 		err := msg.encodePrefix(w, pver)
 		if err != nil {
@@ -1133,7 +1003,8 @@ func (msg *MsgTx) BtcEncode(w io.Writer, pver uint32) error {
 		}
 
 	default:
-		return messageError("MsgTx.BtcEncode", "unsupported transaction type")
+		return messageError("MsgTx.BtcEncode", ErrUnknownTxType,
+			"unsupported transaction type")
 	}
 
 	return nil
@@ -1142,7 +1013,7 @@ func (msg *MsgTx) BtcEncode(w io.Writer, pver uint32) error {
 // Serialize encodes the transaction to w using a format that suitable for
 // long-term storage such as a database while respecting the Version field in
 // the transaction.  This function differs from BtcEncode in that BtcEncode
-// encodes the transaction to the decred wire protocol in order to be sent
+// encodes the transaction to the Decred wire protocol in order to be sent
 // across the network.  The wire encoding can technically differ depending on
 // the protocol version and doesn't even really need to match the format of a
 // stored transaction at all.  As of the time this comment was written, the
@@ -1177,7 +1048,7 @@ func (msg *MsgTx) BytesWitness() ([]byte, error) {
 }
 
 // SerializeSize returns the number of bytes it would take to serialize the
-// the transaction.
+// transaction.  This is part of the Message interface implementation.
 func (msg *MsgTx) SerializeSize() int {
 	// Unknown type return 0.
 	n := 0
@@ -1203,24 +1074,6 @@ func (msg *MsgTx) SerializeSize() int {
 
 		for _, txIn := range msg.TxIn {
 			n += txIn.SerializeSizeWitness()
-		}
-
-	case TxSerializeWitnessSigning:
-		// Version 4 bytes + Serialized varint size for the
-		// number of transaction signatures.
-		n = 4 + VarIntSerializeSize(uint64(len(msg.TxIn)))
-
-		for _, txIn := range msg.TxIn {
-			n += txIn.SerializeSizeWitnessSigning()
-		}
-
-	case TxSerializeWitnessValueSigning:
-		// Version 4 bytes + Serialized varint size for the
-		// number of transaction signatures.
-		n = 4 + VarIntSerializeSize(uint64(len(msg.TxIn)))
-
-		for _, txIn := range msg.TxIn {
-			n += txIn.SerializeSizeWitnessValueSigning()
 		}
 
 	case TxSerializeFull:
@@ -1303,7 +1156,7 @@ func (msg *MsgTx) PkScriptLocs() []int {
 	return pkScriptLocs
 }
 
-// NewMsgTx returns a new decred tx message that conforms to the Message
+// NewMsgTx returns a new Decred tx message that conforms to the Message
 // interface.  The return instance has a default version of TxVersion and there
 // are no transaction inputs or outputs.  Also, the lock time is set to zero
 // to indicate the transaction is valid immediately as opposed to some time in
@@ -1324,41 +1177,51 @@ func ReadOutPoint(r io.Reader, pver uint32, version uint16, op *OutPoint) error 
 		return err
 	}
 
-	op.Index, err = binarySerializer.Uint32(r, littleEndian)
+	err = readUint32LE(r, &op.Index)
 	if err != nil {
 		return err
 	}
 
-	tree, err := binarySerializer.Uint8(r)
+	var tree uint8
+	err = readUint8(r, &tree)
 	if err != nil {
 		return err
 	}
 	op.Tree = int8(tree)
+	if op.Tree < 0 {
+		msg := fmt.Sprintf("negative transaction tree: %d", op.Tree)
+		return messageError("ReadOutPoint", ErrNegativeTxTree, msg)
+	}
 
 	return nil
 }
 
-// WriteOutPoint encodes op to the decred protocol encoding for an OutPoint
+// WriteOutPoint encodes op to the Decred protocol encoding for an OutPoint
 // to w.
 func WriteOutPoint(w io.Writer, pver uint32, version uint16, op *OutPoint) error {
+	if op.Tree < 0 {
+		msg := fmt.Sprintf("negative transaction tree: %d", op.Tree)
+		return messageError("WriteOutPoint", ErrNegativeTxTree, msg)
+	}
+
 	_, err := w.Write(op.Hash[:])
 	if err != nil {
 		return err
 	}
 
-	err = binarySerializer.PutUint32(w, littleEndian, op.Index)
+	err = writeUint32LE(w, op.Index)
 	if err != nil {
 		return err
 	}
 
-	return binarySerializer.PutUint8(w, uint8(op.Tree))
+	return writeUint8(w, uint8(op.Tree))
 }
 
 // readTxInPrefix reads the next sequence of bytes from r as a transaction input
 // (TxIn) in the transaction prefix.
 func readTxInPrefix(r io.Reader, pver uint32, serType TxSerializeType, version uint16, ti *TxIn) error {
 	if serType == TxSerializeOnlyWitness {
-		return messageError("readTxInPrefix",
+		return messageError("readTxInPrefix", ErrReadInPrefixFromWitnessOnlyTx,
 			"tried to read a prefix input for a witness only tx")
 	}
 
@@ -1369,28 +1232,28 @@ func readTxInPrefix(r io.Reader, pver uint32, serType TxSerializeType, version u
 	}
 
 	// Sequence.
-	ti.Sequence, err = binarySerializer.Uint32(r, littleEndian)
-	return err
+	return readUint32LE(r, &ti.Sequence)
 }
 
 // readTxInWitness reads the next sequence of bytes from r as a transaction input
 // (TxIn) in the transaction witness.
 func readTxInWitness(r io.Reader, pver uint32, version uint16, ti *TxIn) error {
 	// ValueIn.
-	valueIn, err := binarySerializer.Uint64(r, littleEndian)
+	var valueIn uint64
+	err := readUint64LE(r, &valueIn)
 	if err != nil {
 		return err
 	}
 	ti.ValueIn = int64(valueIn)
 
 	// BlockHeight.
-	ti.BlockHeight, err = binarySerializer.Uint32(r, littleEndian)
+	err = readUint32LE(r, &ti.BlockHeight)
 	if err != nil {
 		return err
 	}
 
 	// BlockIndex.
-	ti.BlockIndex, err = binarySerializer.Uint32(r, littleEndian)
+	err = readUint32LE(r, &ti.BlockIndex)
 	if err != nil {
 		return err
 	}
@@ -1401,32 +1264,7 @@ func readTxInWitness(r io.Reader, pver uint32, version uint16, ti *TxIn) error {
 	return err
 }
 
-// readTxInWitnessSigning reads a TxIn witness for signing.
-func readTxInWitnessSigning(r io.Reader, pver uint32, version uint16, ti *TxIn) error {
-	// Signature script.
-	var err error
-	ti.SignatureScript, err = readScript(r, pver, MaxMessagePayload,
-		"transaction input signature script")
-	return err
-}
-
-// readTxInWitnessValueSigning reads a TxIn witness for signing with value
-// included.
-func readTxInWitnessValueSigning(r io.Reader, pver uint32, version uint16, ti *TxIn) error {
-	// ValueIn.
-	valueIn, err := binarySerializer.Uint64(r, littleEndian)
-	if err != nil {
-		return err
-	}
-	ti.ValueIn = int64(valueIn)
-
-	// Signature script.
-	ti.SignatureScript, err = readScript(r, pver, MaxMessagePayload,
-		"transaction input signature script")
-	return err
-}
-
-// writeTxInPrefixs encodes ti to the decred protocol encoding for a transaction
+// writeTxInPrefix encodes ti to the Decred protocol encoding for a transaction
 // input (TxIn) prefix to w.
 func writeTxInPrefix(w io.Writer, pver uint32, version uint16, ti *TxIn) error {
 	err := WriteOutPoint(w, pver, version, &ti.PreviousOutPoint)
@@ -1434,26 +1272,26 @@ func writeTxInPrefix(w io.Writer, pver uint32, version uint16, ti *TxIn) error {
 		return err
 	}
 
-	return binarySerializer.PutUint32(w, littleEndian, ti.Sequence)
+	return writeUint32LE(w, ti.Sequence)
 }
 
-// writeTxWitness encodes ti to the decred protocol encoding for a transaction
+// writeTxInWitness encodes ti to the Decred protocol encoding for a transaction
 // input (TxIn) witness to w.
 func writeTxInWitness(w io.Writer, pver uint32, version uint16, ti *TxIn) error {
 	// ValueIn.
-	err := binarySerializer.PutUint64(w, littleEndian, uint64(ti.ValueIn))
+	err := writeUint64LE(w, uint64(ti.ValueIn))
 	if err != nil {
 		return err
 	}
 
 	// BlockHeight.
-	err = binarySerializer.PutUint32(w, littleEndian, ti.BlockHeight)
+	err = writeUint32LE(w, ti.BlockHeight)
 	if err != nil {
 		return err
 	}
 
 	// BlockIndex.
-	binarySerializer.PutUint32(w, littleEndian, ti.BlockIndex)
+	err = writeUint32LE(w, ti.BlockIndex)
 	if err != nil {
 		return err
 	}
@@ -1462,36 +1300,17 @@ func writeTxInWitness(w io.Writer, pver uint32, version uint16, ti *TxIn) error 
 	return WriteVarBytes(w, pver, ti.SignatureScript)
 }
 
-// writeTxInWitnessSigning encodes ti to the decred protocol encoding for a
-// transaction input (TxIn) witness to w for signing.
-func writeTxInWitnessSigning(w io.Writer, pver uint32, version uint16, ti *TxIn) error {
-	// Only write the signature script.
-	return WriteVarBytes(w, pver, ti.SignatureScript)
-}
-
-// writeTxInWitnessValueSigning encodes ti to the decred protocol encoding for a
-// transaction input (TxIn) witness to w for signing with value included.
-func writeTxInWitnessValueSigning(w io.Writer, pver uint32, version uint16, ti *TxIn) error {
-	// ValueIn.
-	err := binarySerializer.PutUint64(w, littleEndian, uint64(ti.ValueIn))
-	if err != nil {
-		return err
-	}
-
-	// Signature script.
-	return WriteVarBytes(w, pver, ti.SignatureScript)
-}
-
 // readTxOut reads the next sequence of bytes from r as a transaction output
 // (TxOut).
 func readTxOut(r io.Reader, pver uint32, version uint16, to *TxOut) error {
-	value, err := binarySerializer.Uint64(r, littleEndian)
+	var value uint64
+	err := readUint64LE(r, &value)
 	if err != nil {
 		return err
 	}
 	to.Value = int64(value)
 
-	to.Version, err = binarySerializer.Uint16(r, littleEndian)
+	err = readUint16LE(r, &to.Version)
 	if err != nil {
 		return err
 	}
@@ -1501,15 +1320,15 @@ func readTxOut(r io.Reader, pver uint32, version uint16, to *TxOut) error {
 	return err
 }
 
-// writeTxOut encodes to into the decred protocol encoding for a transaction
+// writeTxOut encodes to into the Decred protocol encoding for a transaction
 // output (TxOut) to w.
 func writeTxOut(w io.Writer, pver uint32, version uint16, to *TxOut) error {
-	err := binarySerializer.PutUint64(w, littleEndian, uint64(to.Value))
+	err := writeUint64LE(w, uint64(to.Value))
 	if err != nil {
 		return err
 	}
 
-	err = binarySerializer.PutUint16(w, littleEndian, to.Version)
+	err = writeUint16LE(w, to.Version)
 	if err != nil {
 		return err
 	}

@@ -1,18 +1,19 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/btcsuite/btclog"
-	"github.com/decred/dcrd/database"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/slog"
 	flags "github.com/jessevdk/go-flags"
 )
 
@@ -22,7 +23,7 @@ const (
 )
 
 var (
-	log             btclog.Logger
+	log             slog.Logger
 	shutdownChannel = make(chan error)
 )
 
@@ -37,9 +38,7 @@ func loadBlockDB() (database.DB, error) {
 	if err != nil {
 		// Return the error if it's not because the database doesn't
 		// exist.
-		if dbErr, ok := err.(database.Error); !ok || dbErr.ErrorCode !=
-			database.ErrDbDoesNotExist {
-
+		if !errors.Is(err, database.ErrDbDoesNotExist) {
 			return nil, err
 		}
 
@@ -62,11 +61,11 @@ func loadBlockDB() (database.DB, error) {
 // around the fact that deferred functions do not run when os.Exit() is called.
 func realMain() error {
 	// Setup logging.
-	backendLogger := btclog.NewBackend(os.Stdout)
+	backendLogger := slog.NewBackend(os.Stdout)
 	defer os.Stdout.Sync()
 	log = backendLogger.Logger("MAIN")
 	dbLog := backendLogger.Logger("BCDB")
-	dbLog.SetLevel(btclog.LevelDebug)
+	dbLog.SetLevel(slog.LevelDebug)
 	database.UseLogger(dbLog)
 
 	// Setup the parser options and commands.
@@ -94,7 +93,8 @@ func realMain() error {
 	// Parse command line and invoke the Execute function for the specified
 	// command.
 	if _, err := parser.Parse(); err != nil {
-		if e, ok := err.(*flags.Error); ok && e.Type == flags.ErrHelp {
+		var e *flags.Error
+		if errors.As(err, &e) && e.Type == flags.ErrHelp {
 			parser.WriteHelp(os.Stderr)
 		} else {
 			log.Error(err)

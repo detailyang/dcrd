@@ -1,9 +1,9 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package hdkeychain_test
+package hdkeychain
 
 // References:
 //   [BIP32]: BIP0032 - Hierarchical Deterministic Wallets
@@ -13,28 +13,78 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
-	"reflect"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg"
-	"github.com/decred/dcrd/hdkeychain"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
+
+// mockNetParams implements the NetworkParams interface and is used throughout
+// the tests to mock multiple networks.
+type mockNetParams struct {
+	privKeyID [4]byte
+	pubKeyID  [4]byte
+}
+
+// HDPrivKeyVersion returns the extended private key version bytes associated
+// with the mock params.
+//
+// This is part of the NetworkParams interface.
+func (p *mockNetParams) HDPrivKeyVersion() [4]byte {
+	return p.privKeyID
+}
+
+// HDPubKeyVersion returns the extended public key version bytes associated with
+// the mock params.
+//
+// This is part of the NetworkParams interface.
+func (p *mockNetParams) HDPubKeyVersion() [4]byte {
+	return p.pubKeyID
+}
+
+// mockMainNetParams returns mock mainnet parameters to use throughout the
+// tests.  They match the Decred mainnet params as of the time this comment was
+// written.
+func mockMainNetParams() *mockNetParams {
+	return &mockNetParams{
+		privKeyID: [4]byte{0x02, 0xfd, 0xa4, 0xe8}, // starts with dprv
+		pubKeyID:  [4]byte{0x02, 0xfd, 0xa9, 0x26}, // starts with dpub
+	}
+}
+
+// mockTestNetParams returns mock testnet parameters to use throughout the
+// tests.  They match the Decred testnet version 3 params as of the time this
+// comment was written.
+func mockTestNetParams() *mockNetParams {
+	return &mockNetParams{
+		privKeyID: [4]byte{0x04, 0x35, 0x83, 0x97}, // starts with tprv
+		pubKeyID:  [4]byte{0x04, 0x35, 0x87, 0xd1}, // starts with tpub
+	}
+}
 
 // TestBIP0032Vectors tests the vectors provided by [BIP32] to ensure the
 // derivation works as intended.
 func TestBIP0032Vectors(t *testing.T) {
 	// The master seeds for each of the two test vectors in [BIP32].
+	//
+	// Note that the 3rd seed has been changed to ensure the condition it is
+	// intended to test applies with the modified hash function used in Decred.
+	//
+	// In particular, it results in hardened child 0 of the master key having
+	// a child key with leading zeroes.
 	testVec1MasterHex := "000102030405060708090a0b0c0d0e0f"
 	testVec2MasterHex := "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542"
+	testVec3MasterHex := "4b381541583be4423346c643850da4b320e46a87ae3d2a4e6da11eba819cd4acba45d239319ac14f863b8d5ab5a0d0c64d2e8a1e7d1457df2e5a3c5100005930"
 	hkStart := uint32(0x80000000)
 
+	mainNetParams := mockMainNetParams()
+	testNetParams := mockTestNetParams()
 	tests := []struct {
 		name     string
 		master   string
 		path     []uint32
 		wantPub  string
 		wantPriv string
-		net      *chaincfg.Params
+		net      NetworkParams
 	}{
 		// Test vector 1
 		{
@@ -43,7 +93,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{},
 			wantPub:  "dpubZ9169KDAEUnyoBhjjmT2VaEodr6pUTDoqCEAeqgbfr2JfkB88BbK77jbTYbcYXb2FVz7DKBdW4P618yd51MwF8DjKVopSbS7Lkgi6bowX5w",
 			wantPriv: "dprv3hCznBesA6jBtmoyVFPfyMSZ1qYZ3WdjdebquvkEfmRfxC9VFEFi2YDaJqHnx7uGe75eGSa3Mn3oHK11hBW7KZUrPxwbCPBmuCi1nwm182s",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H",
@@ -51,7 +101,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart},
 			wantPub:  "dpubZCGVaKZBiMo7pMgLaZm1qmchjWenTeVcUdFQkTNsFGFEA6xs4EW8PKiqYqP7HBAitt9Hw16VQkQ1tjsZQSHNWFc6bEK6bLqrbco24FzBTY4",
 			wantPriv: "dprv3kUQDBztdyjKuwnaL3hfKYpT7W6X2huYH5d61YSWFBebSYwEBHAXJkCpQ7rvMAxPzKqxVCGLvBqWvGxXjAyMJsV1XwKkfnQCM9KctC8k8bk",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1",
@@ -59,7 +109,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1},
 			wantPub:  "dpubZEDyZgdnFBMHxqNhfCUwBfAg1UmXHiTmB5jKtzbAZhF8PTzy2PwAicNdkg1CmW6TARxQeUbgC7nAQenJts4YoG3KMiqcjsjgeMvwLc43w6C",
 			wantPriv: "dprv3nRtCZ5VAoHW4RUwQgRafSNRPUDFrmsgyY71A5eoZceVfuyL9SbZe2rcbwDW2UwpkEniE4urffgbypegscNchPajWzy9QS4cRxF8QYXsZtq",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H",
@@ -67,7 +117,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2},
 			wantPub:  "dpubZGLz7gsJAWzUksvtw3opxx5eeLq5fRaUMDABA3bdUVfnGUk5fiS5Cc3kZGTjWtYr3jrEavQQnAF6jv2WCpZtFX4uFgifXqev6ED1TM9rTCB",
 			wantPriv: "dprv3pYtkZK168vgrU38gXkUSjHQ2LGpEUzQ9fXrR8fGUR59YviSnm6U82XjQYhpJEUPnVcC9bguJBQU5xVM4VFcDHu9BgScGPA6mQMH4bn5Cth",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H/2",
@@ -75,7 +125,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2, 2},
 			wantPub:  "dpubZHv6Cfp2XRSWHQXZBo1dLmVM421Zdkc4MePkyBXCLFttVkCmwZkxth4ZV9PzkFP3DtD5xcVq2CPSYpJMWMaoxu1ixz4GNZFVcE2xnHP6chJ",
 			wantPriv: "dprv3r7zqYFjT3NiNzdnwGxGpYh6S1TJCp1zA6mSEGaqLBJFnCB94cRMp7YYLR49aTZHZ7ya1CXwQJ6rodKeU9NgQTxkPSK7pzgZRgjYkQ7rgJh",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H/2/1000000000",
@@ -83,7 +133,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2, 2, 1000000000},
 			wantPub:  "dpubZL6d9amjfRy1zeoZM2zHDU7uoMvwPqtxHRQAiJjeEtQQWjP3retQV1qKJyzUd6ZJNgbJGXjtc5pdoBcTTYTLoxQzvV9JJCzCjB2eCWpRf8T",
 			wantPriv: "dprv3tJXnTDSb3uE6Euo6WvvhFKfBMNfxuJt5smqyPoHEoomoBMQyhYoQSKJAHWtWxmuqdUVb8q9J2NaTkF6rYm6XDrSotkJ55bM21fffa7VV97",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 
 		// Test vector 2
@@ -93,7 +143,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{},
 			wantPub:  "dpubZ9169KDAEUnynoD4qvXJwmxZt3FFA5UdWn1twnRReE9AxjCKJLNFY1uBoegbFmwzA4Du7yqnu8tLivhrCCH6P3DgBS1HH5vmf8MpNXvvYT9",
 			wantPriv: "dprv3hCznBesA6jBtPKJbQTxRZAKG2gyj8tZKEPaCsV4e9YYFBAgRP2eTSPAeu4r8dTMt9q51j2Vdt5zNqj7jbtovvocrP1qLj6WUTLF9xYQt4y",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 2 chain m/0",
@@ -101,7 +151,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{0},
 			wantPub:  "dpubZBA4RCkCybJFaNbqPuBiyfXY1rvmG1XTdCy1AY1U96dxkFqWc2i5KREMh7NYPpy7ZPMhdpFMAesex3JdFDfX4J5FEW3HjSacqEYPfwb9Cj7",
 			wantPriv: "dprv3jMy45BuuDETfxi59P8NTSjHPrNVq4wPRfLgRd57923L2hosj5NUEqiLYQ4i7fJtUpiXZLr2wUeToJY2Tm5sCpAJdajEHDmieVJiPQNXwu9",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 2 chain m/0/2147483647H",
@@ -109,7 +159,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{0, hkStart + 2147483647},
 			wantPub:  "dpubZDUNkZEcCRCZEizDGL9sAQbZRKSnaxQLeqN9zpueeqCyq2VY7NUGMXASacsK96S8XzNjq3YgFgwLtj8MJBToW6To9U5zxuazEyh89bjR1xA",
 			wantPriv: "dprv3mgHPRgK838mLK6T1p6WeBoJoJtXA1pGTHjqFuyHekcM7UTuER8fGweRRsoLqSuHa98uskVPnJnfWZEBUC1AVmXnSCPDvUFKydXNnnPHTuQ",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 2 chain m/0/2147483647H/1",
@@ -117,7 +167,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{0, hkStart + 2147483647, 1},
 			wantPub:  "dpubZF3wJh7SfggGg74QZW3EE9ei8uQSJEFgd62uyuK5iMgQzUNjpSnprgTpYz3d6Q3fXXtEEXQqpzWcP4LUVuXFsgA8JKt1Hot5kyUk4pPRhDz",
 			wantPriv: "dprv3oFqwZZ9bJcUmhAeJyyshvrTWtrAsHfcRYQbEzNiiH5nGvM6wVTDn6woQEz92b2EHTYZBtLi82jKEnxSouA3cVaW8YWBsw5c3f4mwAhA3d2",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 2 chain m/0/2147483647H/1/2147483646H",
@@ -125,7 +175,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{0, hkStart + 2147483647, 1, hkStart + 2147483646},
 			wantPub:  "dpubZH38NEg1CW19dGZs8NdaT4hDkz7wXPstio1mGpHSAXHpSGW3UnTrn25ERT1Mp8ae5GMoQHMbgQiPrChMXQMdx3UqS8YqFkT1pqait8fY92u",
 			wantPriv: "dprv3qF3177i87wMirg6sraDvqty8yZg6THpXFPSXuM5AShBiiUQbq8FhSZDGkYmBNR3RKfBrxzkKDBpsRFJfTnQfLsvpPPqRnakat6hHQA43X9",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
 		},
 		{
 			name:     "test vector 2 chain m/0/2147483647H/1/2147483646H/2",
@@ -133,7 +183,33 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{0, hkStart + 2147483647, 1, hkStart + 2147483646, 2},
 			wantPub:  "dpubZJoBFoQJ35zvEBgsfhJBssnAp8TY5gvruzQFLmyxcqRb7enVtGfSkLo2CkAZJMpa6T2fx6fUtvTgXtUvSVgAZ56bEwGxQsToeZfFV8VadE1",
 			wantPriv: "dprv3s15tfqzxhw8Kmo7RBEqMeyvC7uGekLniSmvbs3bckpxQ6ks1KKqfmH144Jgh3PLxkyZRcS367kp7DrtUmnG16NpnsoNhxSXRgKbJJ7MUQR",
-			net:      &chaincfg.MainNetParams,
+			net:      mainNetParams,
+		},
+
+		// Test vector 3
+		{
+			name:     "test vector 3 chain m",
+			master:   testVec3MasterHex,
+			path:     []uint32{},
+			wantPub:  "dpubZ9169KDAEUnynpjjLH5vXBfmaBym5MB4HsyZ4ZbsXtJh8DyFVRP8ucKKgNTNSyUZZC93dnJX5eSZxeURPmzHpnBDBieisUbaMJteHNHJpPK",
+			wantPriv: "dprv3hCznBesA6jBtQqy5m2ZzxsWxBRVeQaz6LMEKefWXoi4QfwccU3Xq2oJXgCZvgKQtRXKdgvkyt35PMhyavDyy95dTc1xjbMGd7vJ61LQan8",
+			net:      mainNetParams,
+		},
+		{
+			name:     "test vector 3 chain m/0H",
+			master:   testVec3MasterHex,
+			path:     []uint32{hkStart},
+			wantPub:  "dpubZB4aNJNxjimmDnmC3ZCo7zmSW9ue8i6fRMwpwyHzi15X7j2KHXWSDiPr4ymhbQWg6D3HAjSnqSG3PHDaLVAkUCuRU5ohX9y9z6KL768vYm6",
+			wantPriv: "dprv3jGV1ApffLhyKNsRo39SbmyBt9MNhmWbDpKWD4MdhvUtQAzgQaAq98spvFaUmYyNJSPGLJ9JzgVDNN9bQP62tUpLwVigWZMjXmojbERDmhk",
+			net:      mainNetParams,
+		},
+		{
+			name:     "test vector 3 chain m/0H/0H",
+			master:   testVec3MasterHex,
+			path:     []uint32{hkStart, hkStart},
+			wantPub:  "dpubZESpio8DE1w5E9h5cBwuER5dmfcqZzh19UTstEDJMTfTAbWPJQ8mCFKeqyVgTFL5n4VmrUgbidcH1FmJaPLEWcdyizsdHocfyJTn8Zw8tkB",
+			wantPriv: "dprv3nejMfZv9dsHKjoKMftYiCHP9f4a946vwvqZ9KGwMP4pT3UkRSoA7fodhGCqPVBqgC2wijajQYW9ZQKNMdZ7Ac2L5i7xqHcq4tPzcxzAxhf",
+			net:      mainNetParams,
 		},
 
 		// Test vector 1 - Testnet
@@ -143,7 +219,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{},
 			wantPub:  "tpubVhnMyQmZAhoosedBTX7oacwyCNc5qtdEMoNHudUCW1R6WZTvqCZQoNJHSn4H11puwdk4qyDv2ET637EDap4r8HH3odjBC5nEjmnPcsDfLwm",
 			wantPriv: "tprvZUo1ZuEfLLFWfAYiMVaoDV1EeLmbSRuNzaSh7F4awft7dm8nHfFAFZyobWQyV8Qr26r8M2CmNw6nEb35HaECWFGy1vzx2ZGdyfBeaaHudoi",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H - testnet",
@@ -151,7 +227,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart},
 			wantPub:  "tpubVm3mQR7aeaowtpbnJKRnvpKsJ3A3q5u31EPY1FAU5Re1zvFfmFUE5aHXY4qmjfQcb1uFZf8mvvU1vi89vEzHPQfR5NETLqByzdthaYfQGja",
 			wantPriv: "tprvZY4QzuagpDFegLXKCHtnZgP8k1KZRdBBe1TwCrkrX67387vXDi9yXmy3gnz6tBTyNKcSZmu4wLtVsYzbKZhSVZH89uP7VxV4RboFfozTBMQ",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1 - testnet",
@@ -159,7 +235,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1},
 			wantPub:  "tpubVo1FPnCBBQN83JJ9Nx9iGhsqa1Gnf9sBhgsT9nNmPrdvEHHmjQuGQrwKjuTsDzLLrZiNH8dxiHrASd2uQfmTgR6dqrkyVN5p3P2crvfgpEQ",
 			wantPriv: "tprvZa1tzGfHM2opppDgGvchuZw71ySJFh9LLTwrMPy9qX6wMUxdBsb1s4cqtcLgZVTQ8EZCJeYagpjaw6gkU16ht5Nr8y2WEc9UWQimC4Y6MFs",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H - testnet",
@@ -167,7 +243,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2},
 			wantPub:  "tpubVq8FwnRh6k1JqLrLeoUc3znpCsLM2rytspJJQqPEJf4a7J2tNjQAtrcSYVvPyNnjjscCDaShJLK6mtH6idGo8g8Djpe2HL13VFJgygvRmc9",
 			wantPriv: "tprvZc8uYGtoGNT1crmsYmwbgrr5eqVrdQG3WbNhcSyckKXbEVhjqC5vM4HxhDpzqEyyAVNgEBKdKLTT3EXQesyhPyhFoeVy6ZExqrpurCCRvrF",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H/2 - testnet",
@@ -175,7 +251,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2, 2},
 			wantPub:  "tpubVrhN2mNRTeTLMsSzuYgQRpCWcYWq1C1UtFXtDyJoARHgLZVaeaj4awdFUNrfCjcvv1y3bGY7YNTSanYx2AHir453T7yd83bd1F8eJgtdq3F",
 			wantPriv: "tprvZdi1dFqXdGu39PNXoX9Q4gFn4WgLbjHdX2cHRauBc5khTmAS73Qp39Jmd6BL7U4rw7k45nAfRT9qkuMi4Y6mb9ks1QNUfAmRW9DBY5g5ELT",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 		{
 			name:     "test vector 1 chain m/0H/1/2H/2/1000000000 - testnet",
@@ -183,7 +259,7 @@ func TestBIP0032Vectors(t *testing.T) {
 			path:     []uint32{hkStart, 1, hkStart + 2, 2, 1000000000},
 			wantPub:  "tpubVtstygL8beyr57j14nf4JWq5MtSCmHJNp2YHy6XF53oCMYfrZfrWBGQ1JDT95aoC4pMFuBnB8Ftdq9s3yMAFh7UKQd4f3hLL8C8KipwSek6",
 			wantPriv: "tprvZftYaAoEmHRYrdeXxm83wNtLorbiMpaXSochAi7dWiGDUkLi28YFdU5XSxe53yHVDdEyfiTsKBRZR2HASwVBhueZRroeuFgD6U9JTC1mUyU",
-			net:      &chaincfg.TestNet2Params,
+			net:      testNetParams,
 		},
 	}
 
@@ -196,7 +272,7 @@ tests:
 			continue
 		}
 
-		extKey, err := hdkeychain.NewMaster(masterSeed, test.net)
+		extKey, err := NewMaster(masterSeed, test.net)
 		if err != nil {
 			t.Errorf("NewMaster #%d (%s): unexpected error when "+
 				"creating new master key: %v", i, test.name,
@@ -213,7 +289,7 @@ tests:
 			}
 		}
 
-		privStr, _ := extKey.String()
+		privStr := extKey.String()
 		if privStr != test.wantPriv {
 			t.Errorf("Serialize #%d (%s): mismatched serialized "+
 				"private extended key -- got: %s, want: %s", i,
@@ -221,22 +297,17 @@ tests:
 			continue
 		}
 
-		pubKey, err := extKey.Neuter()
-		if err != nil {
-			t.Errorf("Neuter #%d (%s): unexpected error: %v ", i,
-				test.name, err)
+		pubKey := extKey.Neuter()
+
+		// Neutering a second time should have no effect.
+		// Test for referential equality.
+		if pubKey != pubKey.Neuter() {
+			t.Errorf("Neuter of extended public key returned " +
+				"different object address")
 			continue
 		}
 
-		// Neutering a second time should have no effect.
-		pubKey, err = pubKey.Neuter()
-		if err != nil {
-			t.Errorf("Neuter #%d (%s): unexpected error: %v", i,
-				test.name, err)
-			return
-		}
-
-		pubStr, _ := pubKey.String()
+		pubStr := pubKey.String()
 		if pubStr != test.wantPub {
 			t.Errorf("Neuter #%d (%s): mismatched serialized "+
 				"public extended key -- got: %s, want: %s", i,
@@ -345,9 +416,10 @@ func TestPrivateDerivation(t *testing.T) {
 		},
 	}
 
+	mainNetParms := mockMainNetParams()
 tests:
 	for i, test := range tests {
-		extKey, err := hdkeychain.NewKeyFromString(test.master)
+		extKey, err := NewKeyFromString(test.master, mainNetParms)
 		if err != nil {
 			t.Errorf("NewKeyFromString #%d (%s): unexpected error "+
 				"creating extended key: %v", i, test.name,
@@ -364,7 +436,7 @@ tests:
 			}
 		}
 
-		privStr, _ := extKey.String()
+		privStr := extKey.String()
 		if privStr != test.wantPriv {
 			t.Errorf("Child #%d (%s): mismatched serialized "+
 				"private extended key -- got: %s, want: %s", i,
@@ -464,9 +536,10 @@ func TestPublicDerivation(t *testing.T) {
 		},
 	}
 
+	mainNetParams := mockMainNetParams()
 tests:
 	for i, test := range tests {
-		extKey, err := hdkeychain.NewKeyFromString(test.master)
+		extKey, err := NewKeyFromString(test.master, mainNetParams)
 		if err != nil {
 			t.Errorf("NewKeyFromString #%d (%s): unexpected error "+
 				"creating extended key: %v", i, test.name,
@@ -483,7 +556,7 @@ tests:
 			}
 		}
 
-		pubStr, _ := extKey.String()
+		pubStr := extKey.String()
 		if pubStr != test.wantPub {
 			t.Errorf("Child #%d (%s): mismatched serialized "+
 				"public extended key -- got: %s, want: %s", i,
@@ -495,8 +568,6 @@ tests:
 
 // TestGenenerateSeed ensures the GenerateSeed function works as intended.
 func TestGenenerateSeed(t *testing.T) {
-	wantErr := errors.New("seed length must be between 128 and 512 bits")
-
 	tests := []struct {
 		name   string
 		length uint8
@@ -510,13 +581,13 @@ func TestGenenerateSeed(t *testing.T) {
 		{name: "64 bytes", length: 64},
 
 		// Test invalid lengths.
-		{name: "15 bytes", length: 15, err: wantErr},
-		{name: "65 bytes", length: 65, err: wantErr},
+		{name: "15 bytes", length: 15, err: ErrInvalidSeedLen},
+		{name: "65 bytes", length: 65, err: ErrInvalidSeedLen},
 	}
 
 	for i, test := range tests {
-		seed, err := hdkeychain.GenerateSeed(test.length)
-		if !reflect.DeepEqual(err, test.err) {
+		seed, err := GenerateSeed(test.length)
+		if !errors.Is(err, test.err) {
 			t.Errorf("GenerateSeed #%d (%s): unexpected error -- "+
 				"want %v, got %v", i, test.name, test.err, err)
 			continue
@@ -541,7 +612,6 @@ func TestExtendedKeyAPI(t *testing.T) {
 		privKey    string
 		privKeyErr error
 		pubKey     string
-		address    string
 	}{
 		{
 			name:      "test vector 1 master node private",
@@ -550,21 +620,20 @@ func TestExtendedKeyAPI(t *testing.T) {
 			parentFP:  0,
 			privKey:   "33a63922ea4e6686c9fc31daf136888297537f66c1aabe3363df06af0b8274c7",
 			pubKey:    "039f2e1d7b50b8451911c64cf745f9ba16193b319212a64096e5679555449d8f37",
-			address:   "Dsk8SfRLF2hssYuLcb6Gu4zh19rg2QBEDGs",
 		},
 		{
 			name:       "test vector 2 chain m/0/2147483647/1/2147483646/2",
 			extKey:     "dpubZRuRErXqhdJaZWD1AzXB6d5w2zw7UZ7ALxiS1gHbnQbVEohBzQzsVwGRzq97pmuE7ToA6DGn2QTH4DexxzdnMvkiYUpk8Nh2KEuYUM2RCeU",
 			isPrivate:  false,
 			parentFP:   4220580796,
-			privKeyErr: hdkeychain.ErrNotPrivExtKey,
+			privKeyErr: ErrNotPrivExtKey,
 			pubKey:     "03dceb0b07698ec3d6ac08ae7297e7f5e63d7fda99d3fce1ded31d36badcdd4d36",
-			address:    "DsZcjfdSKUrEQxoyjkWEo7dM4YZKhma8wCa",
 		},
 	}
 
+	mainNetParams := mockMainNetParams()
 	for i, test := range tests {
-		key, err := hdkeychain.NewKeyFromString(test.extKey)
+		key, err := NewKeyFromString(test.extKey, mainNetParams)
 		if err != nil {
 			t.Errorf("NewKeyFromString #%d (%s): unexpected "+
 				"error: %v", i, test.name, err)
@@ -586,7 +655,7 @@ func TestExtendedKeyAPI(t *testing.T) {
 			continue
 		}
 
-		serializedKey, _ := key.String()
+		serializedKey := key.String()
 		if serializedKey != test.extKey {
 			t.Errorf("String #%d (%s): mismatched serialized key "+
 				"-- want %s, got %s", i, test.name, test.extKey,
@@ -594,146 +663,28 @@ func TestExtendedKeyAPI(t *testing.T) {
 			continue
 		}
 
-		privKey, err := key.ECPrivKey()
-		if !reflect.DeepEqual(err, test.privKeyErr) {
-			t.Errorf("ECPrivKey #%d (%s): mismatched error: want "+
-				"%v, got %v", i, test.name, test.privKeyErr, err)
+		privKey, err := key.SerializedPrivKey()
+		if !errors.Is(err, test.privKeyErr) {
+			t.Errorf("SerializedPrivKey #%d (%s): mismatched "+
+				"error: want %v, got %v", i, test.name,
+				test.privKeyErr, err)
 			continue
 		}
 		if test.privKeyErr == nil {
-			privKeyStr := hex.EncodeToString(privKey.Serialize())
+			privKeyStr := hex.EncodeToString(privKey)
 			if privKeyStr != test.privKey {
-				t.Errorf("ECPrivKey #%d (%s): mismatched "+
+				t.Errorf("SerializedPrivKey #%d (%s): mismatched "+
 					"private key -- want %s, got %s", i,
 					test.name, test.privKey, privKeyStr)
 				continue
 			}
 		}
 
-		pubKey, err := key.ECPubKey()
-		if err != nil {
-			t.Errorf("ECPubKey #%d (%s): unexpected error: %v", i,
-				test.name, err)
-			continue
-		}
-		pubKeyStr := hex.EncodeToString(pubKey.SerializeCompressed())
+		pubKeyStr := hex.EncodeToString(key.SerializedPubKey())
 		if pubKeyStr != test.pubKey {
-			t.Errorf("ECPubKey #%d (%s): mismatched public key -- "+
-				"want %s, got %s", i, test.name, test.pubKey,
+			t.Errorf("SerializedPubKey #%d (%s): mismatched public "+
+				"key -- want %s, got %s", i, test.name, test.pubKey,
 				pubKeyStr)
-			continue
-		}
-
-		addr, err := key.Address(&chaincfg.MainNetParams)
-		if err != nil {
-			t.Errorf("Address #%d (%s): unexpected error: %v", i,
-				test.name, err)
-			continue
-		}
-		if addr.EncodeAddress() != test.address {
-			t.Errorf("Address #%d (%s): mismatched address -- want "+
-				"%s, got %s", i, test.name, test.address,
-				addr.EncodeAddress())
-			continue
-		}
-	}
-}
-
-// TestNet ensures the network related APIs work as intended.
-func TestNet(t *testing.T) {
-	tests := []struct {
-		name      string
-		key       string
-		origNet   *chaincfg.Params
-		newNet    *chaincfg.Params
-		newPriv   string
-		newPub    string
-		isPrivate bool
-	}{
-		// Private extended keys.
-		{
-			name:      "mainnet -> simnet",
-			key:       "dprv3hCznBesA6jBu46PsJ9vNJoiCj9ouxtfwCBNjUYuXwbbAS4oEkF6Bnp5G3QbBAjRXy4uWWZYmC5Y71s3ovCyPLrCjEkYGPErrueuPPjvNWh",
-			origNet:   &chaincfg.MainNetParams,
-			newNet:    &chaincfg.SimNetParams,
-			newPriv:   "sprvZ9xkGEZkBei2p9e1uBZRQMGtfGEQNGApP1W19PyNRqg9nuEs2X4ynkvAXWaBiGb5WKiaqcbiKgmyB1HYgcX3mnxiUs7UWeWEfe4tnSpbXLv",
-			newPub:    "spubVNx6fk6e22GL2diV1D6RmVDdDJ4tmitfkERbwnNyzBD8fha1a4PELZEeNoUfNofdyJS2Y19tFgHZQ62tzKwELiBA3xVeZowLr4DJQ7xGuao",
-			isPrivate: true,
-		},
-		{
-			name:      "simnet -> mainnet",
-			key:       "sprvZ9xkGEZkBei2p9e1uBZRQMGtfGEQNGApP1W19PyNRqg9nuEs2X4ynkvAXWaBiGb5WKiaqcbiKgmyB1HYgcX3mnxiUs7UWeWEfe4tnSpbXLv",
-			origNet:   &chaincfg.SimNetParams,
-			newNet:    &chaincfg.MainNetParams,
-			newPriv:   "dprv3hCznBesA6jBu46PsJ9vNJoiCj9ouxtfwCBNjUYuXwbbAS4oEkF6Bnp5G3QbBAjRXy4uWWZYmC5Y71s3ovCyPLrCjEkYGPErrueuPPjvNWh",
-			newPub:    "dpubZ9169KDAEUnyoTzA7pDGtXbxpji5LuUk8johUPVGY2CDsz6S7hahGNL6QmyavE5fgonsepiACAa7FQPsCDeLFnoSSAGiQEQhimBGGK84nye",
-			isPrivate: true,
-		},
-
-		// Public extended keys.
-		{
-			name:      "mainnet -> simnet",
-			key:       "dpubZ9169KDAEUnyoTzA7pDGtXbxpji5LuUk8johUPVGY2CDsz6S7hahGNL6QmyavE5fgonsepiACAa7FQPsCDeLFnoSSAGiQEQhimBGGK84nye",
-			origNet:   &chaincfg.MainNetParams,
-			newNet:    &chaincfg.SimNetParams,
-			newPub:    "spubVNx6fk6e22GL2diV1D6RmVDdDJ4tmitfkERbwnNyzBD8fha1a4PELZEeNoUfNofdyJS2Y19tFgHZQ62tzKwELiBA3xVeZowLr4DJQ7xGuao",
-			isPrivate: false,
-		},
-		{
-			name:      "simnet -> mainnet",
-			key:       "spubVNx6fk6e22GL2diV1D6RmVDdDJ4tmitfkERbwnNyzBD8fha1a4PELZEeNoUfNofdyJS2Y19tFgHZQ62tzKwELiBA3xVeZowLr4DJQ7xGuao",
-			origNet:   &chaincfg.SimNetParams,
-			newNet:    &chaincfg.MainNetParams,
-			newPub:    "dpubZ9169KDAEUnyoTzA7pDGtXbxpji5LuUk8johUPVGY2CDsz6S7hahGNL6QmyavE5fgonsepiACAa7FQPsCDeLFnoSSAGiQEQhimBGGK84nye",
-			isPrivate: false,
-		},
-	}
-
-	for i, test := range tests {
-		extKey, err := hdkeychain.NewKeyFromString(test.key)
-		if err != nil {
-			t.Errorf("NewKeyFromString #%d (%s): unexpected error "+
-				"creating extended key: %v", i, test.name,
-				err)
-			continue
-		}
-
-		if !extKey.IsForNet(test.origNet) {
-			t.Errorf("IsForNet #%d (%s): key is not for expected "+
-				"network %v", i, test.name, test.origNet.Name)
-			continue
-		}
-
-		extKey.SetNet(test.newNet)
-		if !extKey.IsForNet(test.newNet) {
-			t.Errorf("SetNet/IsForNet #%d (%s): key is not for "+
-				"expected network %v", i, test.name,
-				test.newNet.Name)
-			continue
-		}
-
-		if test.isPrivate {
-			privStr, _ := extKey.String()
-			if privStr != test.newPriv {
-				t.Errorf("Serialize #%d (%s): mismatched serialized "+
-					"private extended key -- got: %s, want: %s", i,
-					test.name, privStr, test.newPriv)
-				continue
-			}
-
-			extKey, err = extKey.Neuter()
-			if err != nil {
-				t.Errorf("Neuter #%d (%s): unexpected error: %v ", i,
-					test.name, err)
-				continue
-			}
-		}
-
-		pubStr, _ := extKey.String()
-		if pubStr != test.newPub {
-			t.Errorf("Neuter #%d (%s): mismatched serialized "+
-				"public extended key -- got: %s, want: %s", i,
-				test.name, pubStr, test.newPub)
 			continue
 		}
 	}
@@ -743,111 +694,100 @@ func TestNet(t *testing.T) {
 // the errors are handled properly.
 func TestErrors(t *testing.T) {
 	// Should get an error when seed has too few bytes.
-	net := &chaincfg.MainNetParams
-	_, err := hdkeychain.NewMaster(bytes.Repeat([]byte{0x00}, 15), net)
-	if err != hdkeychain.ErrInvalidSeedLen {
+	net := mockMainNetParams()
+	_, err := NewMaster(bytes.Repeat([]byte{0x00}, 15), net)
+	if !errors.Is(err, ErrInvalidSeedLen) {
 		t.Errorf("NewMaster: mismatched error -- got: %v, want: %v",
-			err, hdkeychain.ErrInvalidSeedLen)
+			err, ErrInvalidSeedLen)
 	}
 
 	// Should get an error when seed has too many bytes.
-	_, err = hdkeychain.NewMaster(bytes.Repeat([]byte{0x00}, 65), net)
-	if err != hdkeychain.ErrInvalidSeedLen {
+	_, err = NewMaster(bytes.Repeat([]byte{0x00}, 65), net)
+	if !errors.Is(err, ErrInvalidSeedLen) {
 		t.Errorf("NewMaster: mismatched error -- got: %v, want: %v",
-			err, hdkeychain.ErrInvalidSeedLen)
+			err, ErrInvalidSeedLen)
 	}
 
 	// Generate a new key and neuter it to a public extended key.
-	seed, err := hdkeychain.GenerateSeed(hdkeychain.RecommendedSeedLen)
+	seed, err := GenerateSeed(RecommendedSeedLen)
 	if err != nil {
 		t.Errorf("GenerateSeed: unexpected error: %v", err)
 		return
 	}
-	extKey, err := hdkeychain.NewMaster(seed, net)
+	extKey, err := NewMaster(seed, net)
 	if err != nil {
 		t.Errorf("NewMaster: unexpected error: %v", err)
 		return
 	}
-	pubKey, err := extKey.Neuter()
-	if err != nil {
-		t.Errorf("Neuter: unexpected error: %v", err)
-		return
-	}
+	pubKey := extKey.Neuter()
 
 	// Deriving a hardened child extended key should fail from a public key.
-	_, err = pubKey.Child(hdkeychain.HardenedKeyStart)
-	if err != hdkeychain.ErrDeriveHardFromPublic {
+	_, err = pubKey.Child(HardenedKeyStart)
+	if !errors.Is(err, ErrDeriveHardFromPublic) {
 		t.Errorf("Child: mismatched error -- got: %v, want: %v",
-			err, hdkeychain.ErrDeriveHardFromPublic)
+			err, ErrDeriveHardFromPublic)
 	}
 
 	// NewKeyFromString failure tests.
 	tests := []struct {
-		name      string
-		key       string
-		err       error
-		neuter    bool
-		neuterErr error
+		name string
+		key  string
+		err  error
 	}{
+		{
+			name: "key length too long",
+			key:  "DNQvB3p9wsKRyaoxXrh2UyBby7RpMtvhe4uJszAE4Mc8qinPwdUkcpqoUZPFAtXf41ukuio6JsUTgKjPnCaAy99fSBHKJgeRmWCrcytLR1GZQqpnR5",
+			err:  ErrInvalidKeyLen,
+		},
 		{
 			name: "invalid key length",
 			key:  "dpub1234",
-			err:  hdkeychain.ErrInvalidKeyLen,
+			err:  ErrInvalidKeyLen,
 		},
 		{
 			name: "bad checksum",
 			key:  "dpubZF6AWaFizAuUcbkZSs8cP8Gxzr6Sg5tLYYM7gEjZMC5GDaSHB4rW4F51zkWyo9U19BnXhc99kkEiPg248bYin8m9b8mGss9nxV6N2QpU8vj",
-			err:  hdkeychain.ErrBadChecksum,
+			err:  ErrBadChecksum,
 		},
 		{
 			name: "pubkey not on curve",
 			key:  "dpubZ9169KDAEUnyoTzA7pDGtXbxpji5LuUk8johUPVGY2CDsz6S7hahGNL6QkeYrUeAPnaJD1MBmrsUnErXScGZdjL6b2gjCRX1Z1GNhLdVCjv",
-			err:  errors.New("pubkey [0,50963827496501355358210603252497135226159332537351223778668747140855667399507] isn't on secp256k1 curve"),
+			err:  secp256k1.ErrPubKeyNotOnCurve,
 		},
 		{
-			name:      "unsupported version",
-			key:       "4s9bfpYH9CkJboPNLFC4BhTENPrjfmKwUxesnqxHBjv585bCLzVdQKuKQ5TouA57FkdDskrR695Z5U2wWwDUUVWXPg7V57sLpc9dMgx74LsVZGEB",
-			err:       nil,
-			neuter:    true,
-			neuterErr: chaincfg.ErrUnknownHDKeyID,
+			name: "unsupported version",
+			key:  "4s9bfpYH9CkJboPNLFC4BhTENPrjfmKwUxesnqxHBjv585bCLzVdQKuKQ5TouA57FkdDskrR695Z5U2wWwDUUVWXPg7V57sLpc9dMgx74LsVZGEB",
+			err:  ErrWrongNetwork,
 		},
 	}
 
+	mainNetParams := mockMainNetParams()
 	for i, test := range tests {
-		extKey, err := hdkeychain.NewKeyFromString(test.key)
-		if !reflect.DeepEqual(err, test.err) {
+		_, err := NewKeyFromString(test.key, mainNetParams)
+		if !errors.Is(err, test.err) {
 			t.Errorf("NewKeyFromString #%d (%s): mismatched error "+
 				"-- got: %v, want: %v", i, test.name, err,
 				test.err)
 			continue
-		}
-
-		if test.neuter {
-			_, err := extKey.Neuter()
-			if !reflect.DeepEqual(err, test.neuterErr) {
-				t.Errorf("Neuter #%d (%s): mismatched error "+
-					"-- got: %v, want: %v", i, test.name,
-					err, test.neuterErr)
-				continue
-			}
 		}
 	}
 }
 
 // TestZero ensures that zeroing an extended key works as intended.
 func TestZero(t *testing.T) {
+	mainNetParams := mockMainNetParams()
 	tests := []struct {
 		name   string
 		master string
 		extKey string
-		net    *chaincfg.Params
+		net    NetworkParams
 	}{
 		// Test vector 1
 		{
 			name:   "test vector 1 chain m",
 			master: "000102030405060708090a0b0c0d0e0f",
 			extKey: "dprv3hCznBesA6jBtmoyVFPfyMSZ1qYZ3WdjdebquvkEfmRfxC9VFEFi2YDaJqHnx7uGe75eGSa3Mn3oHK11hBW7KZUrPxwbCPBmuCi1nwm182s",
-			net:    &chaincfg.MainNetParams,
+			net:    mainNetParams,
 		},
 
 		// Test vector 2
@@ -855,16 +795,16 @@ func TestZero(t *testing.T) {
 			name:   "test vector 2 chain m",
 			master: "fffcf9f6f3f0edeae7e4e1dedbd8d5d2cfccc9c6c3c0bdbab7b4b1aeaba8a5a29f9c999693908d8a8784817e7b7875726f6c696663605d5a5754514e4b484542",
 			extKey: "dprv3hCznBesA6jBtPKJbQTxRZAKG2gyj8tZKEPaCsV4e9YYFBAgRP2eTSPAeu4r8dTMt9q51j2Vdt5zNqj7jbtovvocrP1qLj6WUTLF9xYQt4y",
-			net:    &chaincfg.MainNetParams,
+			net:    mainNetParams,
 		},
 	}
 
 	// Use a closure to test that a key is zeroed since the tests create
 	// keys in different ways and need to test the same things multiple
 	// times.
-	testZeroed := func(i int, testName string, key *hdkeychain.ExtendedKey) bool {
+	testZeroed := func(i int, testName string, key *ExtendedKey) bool {
 		// Zeroing a key should result in it no longer being private
-		if key.IsPrivate() != false {
+		if key.IsPrivate() {
 			t.Errorf("IsPrivate #%d (%s): mismatched key type -- "+
 				"want private %v, got private %v", i, testName,
 				false, key.IsPrivate())
@@ -880,41 +820,28 @@ func TestZero(t *testing.T) {
 		}
 
 		wantKey := "zeroed extended key"
-		_, errZeroed := key.String()
-		if errZeroed.Error() != wantKey {
+		serializedKey := key.String()
+		if serializedKey != wantKey {
 			t.Errorf("String #%d (%s): mismatched serialized key "+
 				"-- want %s, got %s", i, testName, wantKey,
-				errZeroed)
+				serializedKey)
 			return false
 		}
 
-		wantErr := hdkeychain.ErrNotPrivExtKey
-		_, err := key.ECPrivKey()
-		if !reflect.DeepEqual(err, wantErr) {
-			t.Errorf("ECPrivKey #%d (%s): mismatched error: want "+
-				"%v, got %v", i, testName, wantErr, err)
+		wantErr := ErrNotPrivExtKey
+		_, err := key.SerializedPrivKey()
+		if !errors.Is(err, wantErr) {
+			t.Errorf("SerializedPrivKey #%d (%s): mismatched "+
+				"error: want %v, got %v", i, testName, wantErr,
+				err)
 			return false
 		}
 
-		wantErr = errors.New("pubkey string is empty")
-		_, err = key.ECPubKey()
-		if !reflect.DeepEqual(err, wantErr) {
-			t.Errorf("ECPubKey #%d (%s): mismatched error: want "+
-				"%v, got %v", i, testName, wantErr, err)
-			return false
-		}
-
-		wantAddr := "DsWuefL3Rgj6NXoMFqqBzxY2nmh87RZyPkv"
-		addr, err := key.Address(&chaincfg.MainNetParams)
-		if err != nil {
-			t.Errorf("Addres s #%d (%s): unexpected error: %v", i,
-				testName, err)
-			return false
-		}
-		if addr.EncodeAddress() != wantAddr {
-			t.Errorf("Address #%d (%s): mismatched address -- want "+
-				"%s, got %s", i, testName, wantAddr,
-				addr.EncodeAddress())
+		serializedPubKey := key.SerializedPubKey()
+		if len(serializedPubKey) != 0 {
+			t.Errorf("ECPubKey #%d (%s): mismatched serialized "+
+				"pubkey: want nil, got %x", i, testName,
+				serializedPubKey)
 			return false
 		}
 
@@ -929,19 +856,14 @@ func TestZero(t *testing.T) {
 				i, test.name, err)
 			continue
 		}
-		key, err := hdkeychain.NewMaster(masterSeed, test.net)
+		key, err := NewMaster(masterSeed, test.net)
 		if err != nil {
 			t.Errorf("NewMaster #%d (%s): unexpected error when "+
 				"creating new master key: %v", i, test.name,
 				err)
 			continue
 		}
-		neuteredKey, err := key.Neuter()
-		if err != nil {
-			t.Errorf("Neuter #%d (%s): unexpected error: %v", i,
-				test.name, err)
-			continue
-		}
+		neuteredKey := key.Neuter()
 
 		// Ensure both non-neutered and neutered keys are zeroed
 		// properly.
@@ -955,18 +877,13 @@ func TestZero(t *testing.T) {
 		}
 
 		// Deserialize key and get the neutered version.
-		key, err = hdkeychain.NewKeyFromString(test.extKey)
+		key, err = NewKeyFromString(test.extKey, mainNetParams)
 		if err != nil {
 			t.Errorf("NewKeyFromString #%d (%s): unexpected "+
 				"error: %v", i, test.name, err)
 			continue
 		}
-		neuteredKey, err = key.Neuter()
-		if err != nil {
-			t.Errorf("Neuter #%d (%s): unexpected error: %v", i,
-				test.name, err)
-			continue
-		}
+		neuteredKey = key.Neuter()
 
 		// Ensure both non-neutered and neutered keys are zeroed
 		// properly.
@@ -977,6 +894,158 @@ func TestZero(t *testing.T) {
 		neuteredKey.Zero()
 		if !testZeroed(i, test.name+" deserialized neutered", key) {
 			continue
+		}
+	}
+}
+
+// TestBIP0032Vector4 tests the BIP32 test vector 4 against keys derived from
+// the ChildBIP32Std method, which derives keys that retain the leading zeros.
+func TestBIP0032Vector4(t *testing.T) {
+	testVec4MasterHex := "3ddd5602285899a946114506157c7997e5444528f3003f6134712147db19b678"
+	hkStart := uint32(0x80000000)
+
+	mainNetParams := mockMainNetParams()
+	tests := []struct {
+		name         string
+		master       string
+		path         []uint32
+		wantPub      string
+		wantPriv     string
+		wantPrivSer  string
+		leadingZeros int
+		net          NetworkParams
+	}{
+		{
+			name:        "test vector 4 chain m",
+			master:      testVec4MasterHex,
+			path:        []uint32{},
+			wantPub:     "dpubZ9169KDAEUnyovAoD3NuxWgVNvAWqC3eUFUrip8ZnT4emsEvAPCyhVgoymUF6p7gug7K6ewzEaUvy77tT7LStEjj56CaZxLRMSYjypMK1yC",
+			wantPriv:    "dprv3hCznBesA6jBuWH2xXKZSHtEkucFQFTaGhrXyuCCnNU24KDHHRsNcvAnq4596P5sYKTSgqbjUe2UNVxid8J9oDyFsuSWb3L93Jrka3vPtYV",
+			wantPrivSer: "12c0d59c7aa3a10973dbd3f478b65f2516627e3fe61e00c345be9a477ad2e215",
+			net:         mainNetParams,
+		},
+		{ // This test fails when using Child instead of ChildBIP32Std.
+			name:         "test vector 4 chain m/0H -- leading zeros in private key serialization",
+			master:       testVec4MasterHex,
+			path:         []uint32{hkStart},
+			wantPub:      "dpubZBYwK8RvCX3KjyCPhRQ9BYdX1ZYTvcFf67sRtoZGPnEYMCVgVyF5uWToDwePapvd1GtLYHAWGpQWo9ffod84MPvwpHmvKeZnZZf47EJcUmT",
+			wantPriv:     "dprv3jkqwzsd88yXqZJdSuLnfKqGPYzCVffataF79tcuPhdudeU3d1uUpvwn5Btmbai3BoVYhzbsEQ7tcH1XtEJ1BhzNSAtZfqv8BtSpdq5FEpj",
+			wantPrivSer:  "00d948e9261e41362a688b916f297121ba6bfb2274a3575ac0e456551dfd7f7e",
+			leadingZeros: 1, // 1 zero byte
+			net:          mainNetParams,
+		},
+		{
+			name:        "test vector 4 chain m/0H/1H -- completely different key",
+			master:      testVec4MasterHex,
+			path:        []uint32{hkStart, hkStart + 1},
+			wantPub:     "dpubZDVQT3iY5Bz6NtyCE8zfnpgwkN7AEUv5mr6H6vPVPRMupBbjTJojs7qRrvddW9adSJt6obdBgW6DsUAaFD8xRVQfVB4XfWCEYdTYRZ7updr",
+			wantPriv:    "dprv3mhK5vAEzovJUV5RycwKGbth8MYtoYL1aJTxN1T8PLmH6da6aMU8nYKQiC5Zj7mC7pH4G8xPxGZVR51FG9Ssptzx1c39A1JxADS6zDrsLPr",
+			wantPrivSer: "3a2086edd7d9df86c3487a5905a1712a9aa664bce8cc268141e07549eaa8661d",
+			net:         mainNetParams,
+		},
+	}
+
+tests:
+	for i, test := range tests {
+		masterSeed, err := hex.DecodeString(test.master)
+		if err != nil {
+			t.Errorf("DecodeString #%d (%s): unexpected error: %v",
+				i, test.name, err)
+			continue
+		}
+
+		extKey, err := NewMaster(masterSeed, test.net)
+		if err != nil {
+			t.Errorf("NewMaster #%d (%s): unexpected error when "+
+				"creating new master key: %v", i, test.name, err)
+			continue
+		}
+
+		for _, childNum := range test.path {
+			var err error
+			extKey, err = extKey.ChildBIP32Std(childNum)
+			if err != nil {
+				t.Errorf("ChildBIP32Std #%d (%s): %v", i, test.name, err)
+				continue tests
+			}
+		}
+
+		priv, err := extKey.SerializedPrivKey()
+		if err != nil {
+			t.Errorf("SerializedPrivKey #%d (%s): unexpected error: %v",
+				i, test.name, err)
+			continue
+		}
+		if len(priv) != 32 {
+			t.Errorf("SerializedPrivKey #%d (%s): serialized private key "+
+				"length %d, want 32", i, test.name, len(priv))
+			continue
+		}
+
+		privStr := hex.EncodeToString(priv)
+		if privStr != test.wantPrivSer {
+			t.Errorf("Serialize #%d (%s): mismatched serialized "+
+				"private extended key -- got: %s, want: %s", i,
+				test.name, privStr, test.wantPrivSer)
+			continue
+		}
+
+		extKeyStr := extKey.String()
+		if extKeyStr != test.wantPriv {
+			t.Errorf("Serialize #%d (%s): mismatched serialized "+
+				"private extended key -- got: %s, want: %s", i,
+				test.name, extKeyStr, test.wantPriv)
+			continue
+		}
+
+		pubKey := extKey.Neuter()
+
+		// Neutering a second time should have no effect.
+		// Test for referential equality.
+		if pubKey != pubKey.Neuter() {
+			t.Errorf("Neuter #%d (%s): of extended public key returned "+
+				"different object address", i, test.name)
+			continue
+		}
+
+		pubStr := pubKey.String()
+		if pubStr != test.wantPub {
+			t.Errorf("Neuter #%d (%s): mismatched serialized "+
+				"public extended key -- got: %s, want: %s", i,
+				test.name, pubStr, test.wantPub)
+			continue
+		}
+
+		// If this path generates a private key with leading zeros, ensure they
+		// are stripped with the legacy Decred child derivation.
+		if test.leadingZeros > 0 {
+			wantLen := 32 - test.leadingZeros
+			extKey, err := NewMaster(masterSeed, test.net)
+			if err != nil {
+				t.Errorf("NewMaster #%d (%s): unexpected error when "+
+					"creating new master key: %v", i, test.name, err)
+				continue
+			}
+
+			for _, childNum := range test.path {
+				var err error
+				extKey, err = extKey.Child(childNum) // modified/legacy BIP32
+				if err != nil {
+					t.Errorf("Child #%d (%s): %v", i, test.name, err)
+					continue tests
+				}
+			}
+
+			priv, err := extKey.SerializedPrivKey()
+			if err != nil {
+				t.Errorf("SerializedPrivKey #%d (%s): unexpected error: %v",
+					i, test.name, err)
+				continue
+			}
+			if len(priv) != wantLen {
+				t.Errorf("SerializedPrivKey #%d (%s): serialized private key "+
+					"length %d, want %d", i, test.name, len(priv), wantLen)
+			}
 		}
 	}
 }

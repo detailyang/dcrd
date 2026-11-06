@@ -1,5 +1,5 @@
 // Copyright (c) 2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package dcrjson
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -36,21 +37,21 @@ func makeParams(rt reflect.Type, rv reflect.Value) []interface{} {
 // is suitable for transmission to an RPC server.  The provided command type
 // must be a registered type.  All commands provided by this package are
 // registered by default.
-func MarshalCmd(id interface{}, cmd interface{}) ([]byte, error) {
+func MarshalCmd(rpcVersion string, id interface{}, cmd interface{}) ([]byte, error) {
 	// Look up the cmd type and error out if not registered.
 	rt := reflect.TypeOf(cmd)
 	registerLock.RLock()
 	method, ok := concreteTypeToMethod[rt]
 	registerLock.RUnlock()
 	if !ok {
-		str := fmt.Sprintf("%q is not registered", method)
+		str := fmt.Sprintf("%T is not registered", cmd)
 		return nil, makeError(ErrUnregisteredMethod, str)
 	}
 
 	// The provided command must not be nil.
 	rv := reflect.ValueOf(cmd)
 	if rv.IsNil() {
-		str := fmt.Sprint("the specified command is nil")
+		str := "the specified command is nil"
 		return nil, makeError(ErrInvalidType, str)
 	}
 
@@ -60,7 +61,7 @@ func MarshalCmd(id interface{}, cmd interface{}) ([]byte, error) {
 	params := makeParams(rt.Elem(), rv.Elem())
 
 	// Generate and marshal the final JSON-RPC request.
-	rawCmd, err := NewRequest(id, method, params)
+	rawCmd, err := NewRequest(rpcVersion, id, reflect.ValueOf(method).String(), params)
 	if err != nil {
 		return nil, err
 	}
@@ -105,16 +106,15 @@ func populateDefaults(numParams int, info *methodInfo, rv reflect.Value) {
 	}
 }
 
-// UnmarshalCmd unmarshals a JSON-RPC request into a suitable concrete command
-// so long as the method type contained within the marshalled request is
-// registered.
-func UnmarshalCmd(r *Request) (interface{}, error) {
+// ParseParams unmarshals and parses the parameters for a JSON-RPC request based
+// on the registered method.
+func ParseParams(method interface{}, params []json.RawMessage) (interface{}, error) {
 	registerLock.RLock()
-	rtp, ok := methodToConcreteType[r.Method]
-	info := methodToInfo[r.Method]
+	rtp, ok := methodToConcreteType[method]
+	info := methodToInfo[method]
 	registerLock.RUnlock()
 	if !ok {
-		str := fmt.Sprintf("%q is not registered", r.Method)
+		str := fmt.Sprintf("%q is not registered", method)
 		return nil, makeError(ErrUnregisteredMethod, str)
 	}
 	rt := rtp.Elem()
@@ -122,7 +122,7 @@ func UnmarshalCmd(r *Request) (interface{}, error) {
 	rv := rvp.Elem()
 
 	// Ensure the number of parameters are correct.
-	numParams := len(r.Params)
+	numParams := len(params)
 	if err := checkNumParams(numParams, &info); err != nil {
 		return nil, err
 	}
@@ -133,11 +133,12 @@ func UnmarshalCmd(r *Request) (interface{}, error) {
 		rvf := rv.Field(i)
 		// Unmarshal the parameter into the struct field.
 		concreteVal := rvf.Addr().Interface()
-		if err := json.Unmarshal(r.Params[i], &concreteVal); err != nil {
+		if err := json.Unmarshal(params[i], &concreteVal); err != nil {
 			// The most common error is the wrong type, so
 			// explicitly detect that error and make it nicer.
 			fieldName := strings.ToLower(rt.Field(i).Name)
-			if jerr, ok := err.(*json.UnmarshalTypeError); ok {
+			var jerr *json.UnmarshalTypeError
+			if errors.As(err, &jerr) {
 				str := fmt.Sprintf("parameter #%d '%s' must "+
 					"be type %v (got %v)", i+1, fieldName,
 					jerr.Type, jerr.Value)
@@ -184,7 +185,7 @@ func typesMaybeCompatible(dest reflect.Type, src reflect.Type) bool {
 		return true
 	}
 
-	// When both types are numeric, they are potentially compatibile.
+	// When both types are numeric, they are potentially compatible.
 	srcKind := src.Kind()
 	destKind := dest.Kind()
 	if isNumeric(destKind) && isNumeric(srcKind) {
@@ -446,7 +447,7 @@ func assignField(paramNum int, fieldName string, dest reflect.Value, src reflect
 
 		// String -> float of varying size.
 		case reflect.Float32, reflect.Float64:
-			srcFloat, err := strconv.ParseFloat(src.String(), 0)
+			srcFloat, err := strconv.ParseFloat(src.String(), 64)
 			if err != nil {
 				str := fmt.Sprintf("parameter #%d '%s' must "+
 					"parse to a %v", paramNum, fieldName,
@@ -472,7 +473,7 @@ func assignField(paramNum int, fieldName string, dest reflect.Value, src reflect
 			err := json.Unmarshal([]byte(src.String()), &concreteVal)
 			if err != nil {
 				str := fmt.Sprintf("parameter #%d '%s' must "+
-					"be valid JSON which unsmarshals to a %v",
+					"be valid JSON which unmarshals to a %v",
 					paramNum, fieldName, destBaseType)
 				return makeError(ErrInvalidType, str)
 			}
@@ -490,7 +491,7 @@ func assignField(paramNum int, fieldName string, dest reflect.Value, src reflect
 // by this package are already registered by default.
 //
 // The arguments are most efficient when they are the exact same type as the
-// underlying field in the command struct associated with the the method,
+// underlying field in the command struct associated with the method,
 // however this function also will perform a variety of conversions to make it
 // more flexible.  This allows, for example, command line args which are strings
 // to be passed unaltered.  In particular, the following conversions are
@@ -509,7 +510,7 @@ func assignField(paramNum int, fieldName string, dest reflect.Value, src reflect
 //   - Conversion from string to arrays, slices, structs, and maps by treating
 //     the string as marshalled JSON and calling json.Unmarshal into the
 //     destination field
-func NewCmd(method string, args ...interface{}) (interface{}, error) {
+func NewCmd(method interface{}, args ...interface{}) (interface{}, error) {
 	// Look up details about the provided method.  Any methods that aren't
 	// registered are an error.
 	registerLock.RLock()

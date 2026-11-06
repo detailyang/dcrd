@@ -1,20 +1,22 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2022 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 
-	"github.com/btcsuite/btclog"
-	"github.com/decred/dcrd/blockchain"
-	"github.com/decred/dcrd/blockchain/indexers"
-	"github.com/decred/dcrd/database"
-	"github.com/decred/dcrd/limits"
+	"github.com/decred/dcrd/database/v3"
+	"github.com/decred/dcrd/internal/blockchain"
+	"github.com/decred/dcrd/internal/blockchain/indexers"
+	"github.com/decred/dcrd/internal/limits"
+	"github.com/decred/slog"
 )
 
 const (
@@ -24,7 +26,7 @@ const (
 
 var (
 	cfg *config
-	log btclog.Logger
+	log slog.Logger
 )
 
 // loadBlockDB opens the block database and returns a handle to it.
@@ -38,9 +40,7 @@ func loadBlockDB() (database.DB, error) {
 	if err != nil {
 		// Return the error if it's not because the database doesn't
 		// exist.
-		if dbErr, ok := err.(database.Error); !ok || dbErr.ErrorCode !=
-			database.ErrDbDoesNotExist {
-
+		if !errors.Is(err, database.ErrDbDoesNotExist) {
 			return nil, err
 		}
 
@@ -70,7 +70,7 @@ func realMain() error {
 	cfg = tcfg
 
 	// Setup logging.
-	backendLogger := btclog.NewBackend(os.Stdout)
+	backendLogger := slog.NewBackend(os.Stdout)
 	defer os.Stdout.Sync()
 	log = backendLogger.Logger("MAIN")
 	database.UseLogger(backendLogger.Logger("BCDB"))
@@ -85,6 +85,15 @@ func realMain() error {
 	}
 	defer db.Close()
 
+	// Load the UTXO database.
+	utxoDb, err := blockchain.LoadUtxoDB(context.Background(), activeNetParams,
+		cfg.DataDir)
+	if err != nil {
+		log.Errorf("Failed to load UTXO database: %v", err)
+		return err
+	}
+	defer utxoDb.Close()
+
 	fi, err := os.Open(cfg.InFile)
 	if err != nil {
 		log.Errorf("Failed to open file %v: %v", cfg.InFile, err)
@@ -95,7 +104,8 @@ func realMain() error {
 	// Create a block importer for the database and input file and start it.
 	// The done channel returned from start will contain an error if
 	// anything went wrong.
-	importer, err := newBlockImporter(db, fi)
+	ctx, cancel := context.WithCancel(context.Background())
+	importer, err := newBlockImporter(ctx, db, utxoDb, fi, cancel)
 	if err != nil {
 		log.Errorf("Failed create block importer: %v", err)
 		return err
@@ -106,7 +116,7 @@ func realMain() error {
 	// Import contains the statistics about the import including an error
 	// if something went wrong.
 	log.Info("Starting import")
-	resultsChan := importer.Import()
+	resultsChan := importer.Import(ctx)
 	results := <-resultsChan
 	if results.err != nil {
 		log.Errorf("%v", results.err)

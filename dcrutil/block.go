@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -17,10 +17,6 @@ import (
 // OutOfRangeError describes an error due to accessing an element that is out
 // of range.
 type OutOfRangeError string
-
-// assertBlockImmutability throws a panic when a block has been
-// mutated.
-var assertBlockImmutability = false
 
 // BlockHeightUnknown is the value returned for a block height that is unknown.
 // This is typically because the block has not been inserted into the main chain
@@ -75,41 +71,25 @@ func (b *Block) Bytes() ([]byte, error) {
 	return serializedBlock, nil
 }
 
-// BlockHeaderBytes returns the serialized bytes for the Block's header.  This is
-// equivalent to calling Serialize on the underlying wire.MsgBlock, but it
-// returns a byte slice.
+// BlockHeaderBytes returns the serialized bytes for the Block's header.  This
+// is equivalent to calling Serialize on the underlying wire.MsgBlock.Header,
+// but it returns a byte slice.
 func (b *Block) BlockHeaderBytes() ([]byte, error) {
-	// Return the cached serialized bytes if it has already been generated.
-	if len(b.serializedBlock) != 0 {
-		return b.serializedBlock, nil
-	}
-
-	// Serialize the MsgBlock.
+	// Serialize the BlockHeader.
 	var w bytes.Buffer
 	w.Grow(wire.MaxBlockHeaderPayload)
 	err := b.msgBlock.Header.Serialize(&w)
 	if err != nil {
 		return nil, err
 	}
-	serializedBlockHeader := w.Bytes()
 
-	// Cache the serialized bytes and return them.
-	return serializedBlockHeader, nil
+	return w.Bytes(), nil
 }
 
 // Hash returns the block identifier hash for the Block.  This is equivalent to
 // calling BlockHash on the underlying wire.MsgBlock, however it caches the
 // result so subsequent calls are more efficient.
 func (b *Block) Hash() *chainhash.Hash {
-	if assertBlockImmutability {
-		hash := b.msgBlock.BlockHash()
-		if !hash.IsEqual(&b.hash) {
-			str := fmt.Sprintf("ASSERT: mutated util.block detected, old hash "+
-				"%v, new hash %v", b.hash, hash)
-			panic(str)
-		}
-	}
-
 	return &b.hash
 }
 
@@ -122,7 +102,7 @@ func (b *Block) Hash() *chainhash.Hash {
 func (b *Block) Tx(txNum int) (*Tx, error) {
 	// Ensure the requested transaction is in range.
 	numTx := uint64(len(b.msgBlock.Transactions))
-	if txNum < 0 || uint64(txNum) > numTx {
+	if txNum < 0 || uint64(txNum) > numTx-1 {
 		str := fmt.Sprintf("transaction index %d is out of range - max %d",
 			txNum, numTx-1)
 		return nil, OutOfRangeError(str)
@@ -151,7 +131,7 @@ func (b *Block) Tx(txNum int) (*Tx, error) {
 func (b *Block) STx(txNum int) (*Tx, error) {
 	// Ensure the requested transaction is in range.
 	numTx := uint64(len(b.msgBlock.STransactions))
-	if txNum < 0 || uint64(txNum) > numTx {
+	if txNum < 0 || uint64(txNum) > numTx-1 {
 		str := fmt.Sprintf("transaction index %d is out of range - max %d",
 			txNum, numTx-1)
 		return nil, OutOfRangeError(str)
@@ -321,15 +301,13 @@ func NewBlockDeepCopyCoinbase(msgBlock *wire.MsgBlock) *Block {
 
 	lenTxs := len(msgBlock.Transactions)
 	mtxsCopy := make([]*wire.MsgTx, lenTxs)
-	for i, mtx := range msgBlock.Transactions {
-		mtxsCopy[i] = mtx
-	}
+	copy(mtxsCopy, msgBlock.Transactions)
+
 	msgBlockCopy.Transactions = mtxsCopy
 	lenStxs := len(msgBlock.STransactions)
 	smtxsCopy := make([]*wire.MsgTx, lenStxs)
-	for i, smtx := range msgBlock.STransactions {
-		smtxsCopy[i] = smtx
-	}
+	copy(smtxsCopy, msgBlock.STransactions)
+
 	msgBlockCopy.STransactions = smtxsCopy
 	msgBlockCopy.Header = msgBlock.Header
 

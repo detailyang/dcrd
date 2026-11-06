@@ -1,4 +1,4 @@
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2025 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,26 +7,22 @@ package ticketdb
 import (
 	"bytes"
 	"encoding/hex"
-	"os"
-	"path/filepath"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake/internal/dbnamespace"
-	"github.com/decred/dcrd/blockchain/stake/internal/tickettreap"
-	"github.com/decred/dcrd/chaincfg"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/dbnamespace"
+	"github.com/decred/dcrd/blockchain/stake/v5/internal/tickettreap"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/database/v3"
+	_ "github.com/decred/dcrd/database/v3/ffldb"
 )
 
 const (
 	// testDbType is the database backend type to use for the tests.
 	testDbType = "ffldb"
-
-	// testDbRoot is the root directory used to create all test databases.
-	testDbRoot = "testdbs"
 )
 
 // hexToBytes converts a hex string to bytes, without returning any errors.
@@ -109,28 +105,21 @@ func TestDbInfoDeserializeErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		serialized []byte
-		errCode    ErrorCode
+		err        error
 	}{
 		{
 			name:       "short read",
 			serialized: hexToBytes("0000"),
-			errCode:    ErrDatabaseInfoShortRead,
+			err:        ErrDatabaseInfoShortRead,
 		},
 	}
 
 	for _, test := range tests {
 		// Ensure the expected error type is returned.
 		_, err := deserializeDatabaseInfo(test.serialized)
-		ticketDBErr, ok := err.(DBError)
-		if !ok {
-			t.Errorf("couldn't convert deserializeDatabaseInfo error "+
-				"to ticket db error (err: %v)", err)
-			continue
-		}
-		if ticketDBErr.GetCode() != test.errCode {
+		if !errors.Is(err, test.err) {
 			t.Errorf("deserializeDatabaseInfo (%s): expected error type "+
-				"does not match - got %v, want %v", test.name,
-				ticketDBErr.ErrorCode, test.errCode)
+				"does not match - got %v, want %v", test.name, err, test.err)
 			continue
 		}
 	}
@@ -190,7 +179,6 @@ func TestBestChainStateSerialization(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, state, test.state)
 			continue
-
 		}
 	}
 }
@@ -203,28 +191,21 @@ func TestBestChainStateDeserializeErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		serialized []byte
-		errCode    ErrorCode
+		err        error
 	}{
 		{
 			name:       "short read",
 			serialized: hexToBytes("0000"),
-			errCode:    ErrChainStateShortRead,
+			err:        ErrChainStateShortRead,
 		},
 	}
 
 	for _, test := range tests {
 		// Ensure the expected error type is returned.
 		_, err := deserializeBestChainState(test.serialized)
-		ticketDBErr, ok := err.(DBError)
-		if !ok {
-			t.Errorf("couldn't convert deserializeBestChainState error "+
-				"to ticket db error (err: %v)", err)
-			continue
-		}
-		if ticketDBErr.GetCode() != test.errCode {
+		if !errors.Is(err, test.err) {
 			t.Errorf("deserializeBestChainState (%s): expected error type "+
-				"does not match - got %v, want %v", test.name,
-				ticketDBErr.ErrorCode, test.errCode)
+				"does not match - got %v, want %v", test.name, err, test.err)
 			continue
 		}
 	}
@@ -284,7 +265,6 @@ func TestBlockUndoDataSerializing(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, utds, test.utds)
 			continue
-
 		}
 	}
 }
@@ -297,33 +277,26 @@ func TestBlockUndoDataDeserializingErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		serialized []byte
-		errCode    ErrorCode
+		err        error
 	}{
 		{
 			name:       "short read",
 			serialized: hexToBytes("00"),
-			errCode:    ErrUndoDataShortRead,
+			err:        ErrUndoDataShortRead,
 		},
 		{
 			name:       "bad size",
 			serialized: hexToBytes("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-			errCode:    ErrUndoDataCorrupt,
+			err:        ErrUndoDataCorrupt,
 		},
 	}
 
 	for _, test := range tests {
 		// Ensure the expected error type is returned.
 		_, err := deserializeBlockUndoData(test.serialized)
-		ticketDBErr, ok := err.(DBError)
-		if !ok {
-			t.Errorf("couldn't convert deserializeBlockUndoData error "+
-				"to ticket db error (err: %v)", err)
-			continue
-		}
-		if ticketDBErr.GetCode() != test.errCode {
+		if !errors.Is(err, test.err) {
 			t.Errorf("deserializeBlockUndoData (%s): expected error type "+
-				"does not match - got %v, want %v", test.name,
-				ticketDBErr.ErrorCode, test.errCode)
+				"does not match - got %v, want %v", test.name, err, test.err)
 			continue
 		}
 	}
@@ -374,7 +347,6 @@ func TestTicketHashesSerializing(t *testing.T) {
 				"mismatched state - got %v, want %v", i,
 				test.name, ths, test.ths)
 			continue
-
 		}
 	}
 }
@@ -387,33 +359,26 @@ func TestTicketHashesDeserializingErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		serialized []byte
-		errCode    ErrorCode
+		err        error
 	}{
 		{
 			name:       "short read",
 			serialized: hexToBytes("00"),
-			errCode:    ErrTicketHashesShortRead,
+			err:        ErrTicketHashesShortRead,
 		},
 		{
 			name:       "bad size",
 			serialized: hexToBytes("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"),
-			errCode:    ErrTicketHashesCorrupt,
+			err:        ErrTicketHashesCorrupt,
 		},
 	}
 
 	for _, test := range tests {
 		// Ensure the expected error type is returned.
 		_, err := deserializeTicketHashes(test.serialized)
-		ticketDBErr, ok := err.(DBError)
-		if !ok {
-			t.Errorf("couldn't convert deserializeTicketHashes error "+
-				"to ticket db error (err: %v)", err)
-			continue
-		}
-		if ticketDBErr.GetCode() != test.errCode {
+		if !errors.Is(err, test.err) {
 			t.Errorf("deserializeTicketHashes (%s): expected error type "+
-				"does not match - got %v, want %v", test.name,
-				ticketDBErr.ErrorCode, test.errCode)
+				"does not match - got %v, want %v", test.name, err, test.err)
 			continue
 		}
 	}
@@ -422,25 +387,18 @@ func TestTicketHashesDeserializingErrors(t *testing.T) {
 // TestLiveDatabase tests various functions that require a live database.
 func TestLiveDatabase(t *testing.T) {
 	// Create a new database to store the accepted stake node data into.
-	dbName := "ffldb_ticketdb_test"
-	dbPath := filepath.Join(testDbRoot, dbName)
-	_ = os.RemoveAll(dbPath)
-	testDb, err := database.Create(testDbType, dbPath, chaincfg.SimNetParams.Net)
+	dbPath := t.TempDir()
+	net := chaincfg.RegNetParams().Net
+	testDb, err := database.Create(testDbType, dbPath, net)
 	if err != nil {
 		t.Fatalf("error creating db: %v", err)
 	}
-
-	// Setup a teardown.
-	defer os.RemoveAll(dbPath)
-	defer os.RemoveAll(testDbRoot)
 	defer testDb.Close()
 
 	// Initialize the database, then try to read the version.
-	err = testDb.Update(func(dbTx database.Tx) error {
-		return DbCreate(dbTx)
-	})
+	err = testDb.Update(DbCreate)
 	if err != nil {
-		t.Fatalf("%v", err.Error())
+		t.Fatal(err)
 	}
 
 	var dbi *DatabaseInfo
@@ -449,7 +407,7 @@ func TestLiveDatabase(t *testing.T) {
 		return err
 	})
 	if err != nil {
-		t.Fatalf("%v", err.Error())
+		t.Fatal(err)
 	}
 	if dbi.Version != currentDatabaseVersion {
 		t.Fatalf("bad version after reading from DB; want %v, got %v",
@@ -484,7 +442,7 @@ func TestLiveDatabase(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("%v", err.Error())
+		t.Fatal(err)
 	}
 
 	var treap *tickettreap.Immutable
@@ -494,7 +452,7 @@ func TestLiveDatabase(t *testing.T) {
 		return err
 	})
 	if err != nil {
-		t.Fatalf("%v", err.Error())
+		t.Fatal(err)
 	}
 	treap.ForEach(func(k tickettreap.Key, v *tickettreap.Value) bool {
 		ticketMap2[k] = v
@@ -503,6 +461,6 @@ func TestLiveDatabase(t *testing.T) {
 	})
 
 	if !reflect.DeepEqual(ticketMap, ticketMap2) {
-		t.Fatalf("not same ticket maps")
+		t.Fatal("not same ticket maps")
 	}
 }

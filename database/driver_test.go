@@ -1,39 +1,27 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016 The Decred developers
+// Copyright (c) 2016-2023 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package database_test
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
-	"github.com/decred/dcrd/database"
-	_ "github.com/decred/dcrd/database/ffldb"
+	"github.com/decred/dcrd/database/v3"
+	_ "github.com/decred/dcrd/database/v3/ffldb"
 )
 
-var (
-	// ignoreDbTypes are types which should be ignored when running tests
-	// that iterate all supported DB types.  This allows some tests to add
-	// bogus drivers for testing purposes while still allowing other tests
-	// to easily iterate all supported drivers.
-	ignoreDbTypes = map[string]bool{"createopenfail": true}
-)
+// checkDbError ensures the passed error is an Error that matches the passed
+// error kind.
+func checkDbError(t *testing.T, testName string, gotErr error, wantErr database.ErrorKind) bool {
+	t.Helper()
 
-// checkDbError ensures the passed error is a database.Error with an error code
-// that matches the passed  error code.
-func checkDbError(t *testing.T, testName string, gotErr error, wantErrCode database.ErrorCode) bool {
-	dbErr, ok := gotErr.(database.Error)
-	if !ok {
-		t.Errorf("%s: unexpected error type - got %T, want %T",
-			testName, gotErr, database.Error{})
-		return false
-	}
-	if dbErr.ErrorCode != wantErrCode {
-		t.Errorf("%s: unexpected error code - got %s (%s), want %s",
-			testName, dbErr.ErrorCode, dbErr.Description,
-			wantErrCode)
+	if !errors.Is(gotErr, wantErr) {
+		t.Errorf("%s: unexpected error - got %v, want %v", testName, gotErr,
+			wantErr)
 		return false
 	}
 
@@ -99,7 +87,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure creating a database with the new type fails with the expected
 	// error.
 	_, err := database.Create(dbType)
-	if err != openError {
+	if !errors.Is(err, openError) {
 		t.Errorf("expected error not received - got: %v, want %v", err,
 			openError)
 		return
@@ -108,7 +96,7 @@ func TestCreateOpenFail(t *testing.T) {
 	// Ensure opening a database with the new type fails with the expected
 	// error.
 	_, err = database.Open(dbType)
-	if err != openError {
+	if !errors.Is(err, openError) {
 		t.Errorf("expected error not received - got: %v, want %v", err,
 			openError)
 		return

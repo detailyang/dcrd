@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -14,7 +14,7 @@ import (
 	"github.com/decred/dcrd/chaincfg/chainhash"
 )
 
-// TestInvVectStringer tests the stringized output for inventory vector types.
+// TestInvTypeStringer tests the stringized output for inventory vector types.
 func TestInvTypeStringer(t *testing.T) {
 	tests := []struct {
 		in   InvType
@@ -23,6 +23,7 @@ func TestInvTypeStringer(t *testing.T) {
 		{InvTypeError, "ERROR"},
 		{InvTypeTx, "MSG_TX"},
 		{InvTypeBlock, "MSG_BLOCK"},
+		{InvTypeMix, "MSG_MIX"},
 		{0xffffffff, "Unknown InvType (4294967295)"},
 	}
 
@@ -35,7 +36,6 @@ func TestInvTypeStringer(t *testing.T) {
 			continue
 		}
 	}
-
 }
 
 // TestInvVect tests the InvVect API.
@@ -53,7 +53,6 @@ func TestInvVect(t *testing.T) {
 		t.Errorf("NewInvVect: wrong hash - got %v, want %v",
 			spew.Sdump(iv.Hash), spew.Sdump(hash))
 	}
-
 }
 
 // TestInvVectWire tests the InvVect wire encode and decode for various

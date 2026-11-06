@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -49,14 +49,14 @@ func (code RejectCode) String() string {
 	return fmt.Sprintf("Unknown RejectCode (%d)", uint8(code))
 }
 
-// MsgReject implements the Message interface and represents a decred reject
+// MsgReject implements the Message interface and represents a Decred reject
 // message.
 //
-// This message was not added until protocol version RejectVersion.
+// Deprecated: This message is no longer valid as of protocol version
+// RemoveRejectVersion.
 type MsgReject struct {
-	// Cmd is the command for the message which was rejected such as
-	// as CmdBlock or CmdTx.  This can be obtained from the Command function
-	// of a Message.
+	// Cmd is the command for the message which was rejected such as CmdBlock or
+	// CmdTx.  This can be obtained from the Command function of a Message.
 	Cmd string
 
 	// RejectCode is a code indicating why the command was rejected.  It
@@ -72,12 +72,46 @@ type MsgReject struct {
 	Hash chainhash.Hash
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// validateRejectCommand ensures the provided reject command conforms to the
+// results imposed by the protocol.
+func validateRejectCommand(cmd string) error {
+	const op = "MsgReject.validateRejectCommand"
+	if !isStrictAscii(cmd) {
+		msg := "reject command is not strict ASCII"
+		return messageError(op, ErrMalformedStrictString, msg)
+	}
+
+	return nil
+}
+
+// validateRejectReason ensures the provided reject reason conforms to the
+// results imposed by the protocol.
+func validateRejectReason(reason string) error {
+	const op = "MsgReject.validateRejectReason"
+	if !isStrictAscii(reason) {
+		msg := "reject reason is not strict ASCII"
+		return messageError(op, ErrMalformedStrictString, msg)
+	}
+
+	return nil
+}
+
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgReject) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgReject.BtcDecode"
+	if pver >= RemoveRejectVersion {
+		str := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, str)
+	}
+
 	// Command that was rejected.
 	cmd, err := ReadVarString(r, pver)
 	if err != nil {
+		return err
+	}
+	if err := validateRejectCommand(cmd); err != nil {
 		return err
 	}
 	msg.Cmd = cmd
@@ -94,6 +128,9 @@ func (msg *MsgReject) BtcDecode(r io.Reader, pver uint32) error {
 	if err != nil {
 		return err
 	}
+	if err := validateRejectReason(reason); err != nil {
+		return err
+	}
 	msg.Reason = reason
 
 	// CmdBlock and CmdTx messages have an additional hash field that
@@ -108,9 +145,23 @@ func (msg *MsgReject) BtcDecode(r io.Reader, pver uint32) error {
 	return nil
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgReject) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgReject.BtcEncode"
+	if pver >= RemoveRejectVersion {
+		str := fmt.Sprintf("%s message invalid for protocol version %d",
+			msg.Command(), pver)
+		return messageError(op, ErrMsgInvalidForPVer, str)
+	}
+
+	if err := validateRejectCommand(msg.Cmd); err != nil {
+		return err
+	}
+	if err := validateRejectReason(msg.Reason); err != nil {
+		return err
+	}
+
 	// Command that was rejected.
 	err := WriteVarString(w, pver, msg.Cmd)
 	if err != nil {
@@ -118,7 +169,7 @@ func (msg *MsgReject) BtcEncode(w io.Writer, pver uint32) error {
 	}
 
 	// Code indicating why the command was rejected.
-	err = writeElement(w, msg.Code)
+	err = writeElement(w, &msg.Code)
 	if err != nil {
 		return err
 	}
@@ -151,16 +202,34 @@ func (msg *MsgReject) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgReject) MaxPayloadLength(pver uint32) uint32 {
-	plen := uint32(0)
-	// Unfortunately the decred protocol does not enforce a sane
+	if pver >= RemoveRejectVersion {
+		return 0
+	}
+
+	// Unfortunately the Decred protocol does not enforce a sane
 	// limit on the length of the reason, so the max payload is the
 	// overall maximum message payload.
-	plen = MaxMessagePayload
-
-	return plen
+	return uint32(MaxMessagePayload)
 }
 
-// NewMsgReject returns a new decred reject message that conforms to the
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgReject) SerializeSize() int {
+	// Rejected command (varInt + string) + code 1 byte + reason (varInt +
+	// string).
+	n := VarIntSerializeSize(uint64(len(msg.Cmd))) + len(msg.Cmd) + 1 +
+		VarIntSerializeSize(uint64(len(msg.Reason))) + len(msg.Reason)
+
+	// CmdBlock and CmdTx messages have an additional hash field that
+	// identifies the specific block or transaction.
+	if msg.Cmd == CmdBlock || msg.Cmd == CmdTx {
+		n += chainhash.HashSize
+	}
+
+	return n
+}
+
+// NewMsgReject returns a new Decred reject message that conforms to the
 // Message interface.  See MsgReject for details.
 func NewMsgReject(command string, code RejectCode, reason string) *MsgReject {
 	return &MsgReject{

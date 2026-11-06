@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -18,10 +18,10 @@ import (
 // version message (MsgVersion).
 const MaxUserAgentLen = 256
 
-// DefaultUserAgent for wire in the stack
-const DefaultUserAgent = "/dcrwire:0.3.0/"
+// DefaultUserAgent for wire in the stack.
+const DefaultUserAgent = "/dcrwire:1.0.0/"
 
-// MsgVersion implements the Message interface and represents a decred version
+// MsgVersion implements the Message interface and represents a Decred version
 // message.  It is used for a peer to advertise itself as soon as an outbound
 // connection is made.  The remote peer then uses this information along with
 // its own to negotiate.  The remote peer must then respond with a version
@@ -48,7 +48,7 @@ type MsgVersion struct {
 	// connections.
 	Nonce uint64
 
-	// The user agent that generated messsage.  This is a encoded as a varString
+	// The user agent that generated message.  This is encoded as a varString
 	// on the wire.  This has a max length of MaxUserAgentLen.
 	UserAgent string
 
@@ -71,7 +71,7 @@ func (msg *MsgVersion) AddService(service ServiceFlag) {
 	msg.Services |= service
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // The version message is special in that the protocol version hasn't been
 // negotiated yet.  As a result, the pver field is ignored and any fields which
 // are added in new versions are optional.  This also mean that r must be a
@@ -79,10 +79,17 @@ func (msg *MsgVersion) AddService(service ServiceFlag) {
 //
 // This is part of the Message interface implementation.
 func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32) error {
-	buf, ok := r.(*bytes.Buffer)
-	if !ok {
-		return fmt.Errorf("in method MsgVersion.BtcDecode reader is not a " +
-			"*bytes.Buffer")
+	const op = "MsgVersion.BtcDecode"
+	// In addition to a *bytes.Buffer as described by the public
+	// documentation, the internal *wireBuffer type is also allowed.
+	var buf *bytes.Buffer
+	switch r := r.(type) {
+	case *wireBuffer:
+		buf = (*bytes.Buffer)(r)
+	case *bytes.Buffer:
+		buf = r
+	default:
+		return messageError(op, ErrInvalidMsg, "reader is not a *bytes.Buffer")
 	}
 
 	err := readElements(buf, &msg.ProtocolVersion, &msg.Services,
@@ -149,7 +156,7 @@ func (msg *MsgVersion) BtcDecode(r io.Reader, pver uint32) error {
 	return nil
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgVersion) BtcEncode(w io.Writer, pver uint32) error {
 	err := validateUserAgent(msg.UserAgent)
@@ -157,8 +164,8 @@ func (msg *MsgVersion) BtcEncode(w io.Writer, pver uint32) error {
 		return err
 	}
 
-	err = writeElements(w, msg.ProtocolVersion, msg.Services,
-		msg.Timestamp.Unix())
+	err = writeElements(w, &msg.ProtocolVersion, &msg.Services,
+		(*int64Time)(&msg.Timestamp))
 	if err != nil {
 		return err
 	}
@@ -173,7 +180,7 @@ func (msg *MsgVersion) BtcEncode(w io.Writer, pver uint32) error {
 		return err
 	}
 
-	err = writeElement(w, msg.Nonce)
+	err = writeElement(w, &msg.Nonce)
 	if err != nil {
 		return err
 	}
@@ -183,12 +190,13 @@ func (msg *MsgVersion) BtcEncode(w io.Writer, pver uint32) error {
 		return err
 	}
 
-	err = writeElement(w, msg.LastBlock)
+	err = writeElement(w, &msg.LastBlock)
 	if err != nil {
 		return err
 	}
 
-	return writeElement(w, !msg.DisableRelayTx)
+	var relayTx = !msg.DisableRelayTx
+	return writeElement(w, &relayTx)
 }
 
 // Command returns the protocol command string for the message.  This is part
@@ -200,17 +208,28 @@ func (msg *MsgVersion) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgVersion) MaxPayloadLength(pver uint32) uint32 {
-	// XXX: <= 106 different
-
 	// Protocol version 4 bytes + services 8 bytes + timestamp 8 bytes +
 	// remote and local net addresses + nonce 8 bytes + length of user
 	// agent (varInt) + max allowed useragent length + last block 4 bytes +
 	// relay transactions flag 1 byte.
-	return 33 + (maxNetAddressPayload(pver) * 2) + MaxVarIntPayload +
+	return 33 + (maxNetAddressPayload * 2) + MaxVarIntPayload +
 		MaxUserAgentLen
 }
 
-// NewMsgVersion returns a new decred version message that conforms to the
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgVersion) SerializeSize() int {
+	// Protocol version 4 bytes + services 8 bytes + timestamp 8 bytes + remote
+	// and local net addresses (without timestamp) + nonce 8 bytes + user agent
+	// (varInt + string) + last block 4 bytes + relay transactions flag 1 byte.
+	const includeTimestamp = false
+	return 4 + 8 + 8 + msg.AddrYou.SerializeSize(includeTimestamp) +
+		msg.AddrMe.SerializeSize(includeTimestamp) + 8 +
+		VarIntSerializeSize(uint64(len(msg.UserAgent))) + len(msg.UserAgent) +
+		4 + 1
+}
+
+// NewMsgVersion returns a new Decred version message that conforms to the
 // Message interface using the passed parameters and defaults for the remaining
 // fields.
 func NewMsgVersion(me *NetAddress, you *NetAddress, nonce uint64,
@@ -232,7 +251,7 @@ func NewMsgVersion(me *NetAddress, you *NetAddress, nonce uint64,
 }
 
 // NewMsgVersionFromConn is a convenience function that extracts the remote
-// and local address from conn and returns a new decred version message that
+// and local address from conn and returns a new Decred version message that
 // conforms to the Message interface.  See NewMsgVersion.
 func NewMsgVersionFromConn(conn net.Conn, nonce uint64,
 	lastBlock int32) (*MsgVersion, error) {
@@ -252,13 +271,21 @@ func NewMsgVersionFromConn(conn net.Conn, nonce uint64,
 	return NewMsgVersion(lna, rna, nonce, lastBlock), nil
 }
 
-// validateUserAgent checks userAgent length against MaxUserAgentLen
+// validateUserAgent ensures the provided user agent conforms to the results
+// imposed by the protocol.
 func validateUserAgent(userAgent string) error {
+	const op = "MsgVersion.validateUserAgent"
 	if len(userAgent) > MaxUserAgentLen {
-		str := fmt.Sprintf("user agent too long [len %v, max %v]",
+		msg := fmt.Sprintf("user agent too long [len %v, max %v]",
 			len(userAgent), MaxUserAgentLen)
-		return messageError("MsgVersion", str)
+		return messageError(op, ErrUserAgentTooLong, msg)
 	}
+
+	if !isStrictAscii(userAgent) {
+		msg := "user agent is not strict ASCII"
+		return messageError(op, ErrMalformedStrictString, msg)
+	}
+
 	return nil
 }
 

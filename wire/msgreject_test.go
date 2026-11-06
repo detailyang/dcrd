@@ -1,5 +1,5 @@
 // Copyright (c) 2014-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -40,12 +41,52 @@ func TestRejectCodeStringer(t *testing.T) {
 			continue
 		}
 	}
-
 }
 
-// TestRejectLatest tests the MsgPong API against the latest protocol version.
+// TestRejectLatest tests the MsgReject API against the latest protocol version
+// to ensure it is no longer valid.
 func TestRejectLatest(t *testing.T) {
 	pver := ProtocolVersion
+
+	// Create reject message data.
+	rejCommand := (&MsgBlock{}).Command()
+	rejCode := RejectDuplicate
+	rejReason := "duplicate block"
+	rejHash := mainNetGenesisHash
+
+	// Ensure we get the correct data back out.
+	msg := NewMsgReject(rejCommand, rejCode, rejReason)
+	msg.Hash = rejHash
+
+	// Ensure max payload is expected value.
+	wantPayload := uint32(0)
+	maxPayload := msg.MaxPayloadLength(pver)
+	if maxPayload != wantPayload {
+		t.Errorf("MaxPayloadLength: wrong max payload length for protocol "+
+			"version %d - got %v, want %v", pver, maxPayload, wantPayload)
+	}
+
+	// Ensure encode fails with the latest protocol version.
+	var buf bytes.Buffer
+	err := msg.BtcEncode(&buf, pver)
+	if !errors.Is(err, ErrMsgInvalidForPVer) {
+		t.Errorf("MsgReject encode unexpected err -- got %v, want %v", err,
+			ErrMsgInvalidForPVer)
+	}
+
+	// Ensure decode fails with the latest protocol version.
+	var readMsg MsgReject
+	err = readMsg.BtcDecode(&buf, pver)
+	if !errors.Is(err, ErrMsgInvalidForPVer) {
+		t.Errorf("MsgReject decode unexpected err -- got %v, want %v", err,
+			ErrMsgInvalidForPVer)
+	}
+}
+
+// TestRejectLastSupported tests the MsgReject API against the last protocol
+// version that was supported.
+func TestRejectLastSupported(t *testing.T) {
+	pver := RemoveRejectVersion - 1
 
 	// Create reject message data.
 	rejCommand := (&MsgBlock{}).Command()
@@ -76,7 +117,8 @@ func TestRejectLatest(t *testing.T) {
 			cmd, wantCmd)
 	}
 
-	// Ensure max payload is expected value for latest protocol version.
+	// Ensure max payload is expected value for the last protocol version that
+	// was supported.
 	wantPayload := uint32(MaxMessagePayload)
 	maxPayload := msg.MaxPayloadLength(pver)
 	if maxPayload != wantPayload {
@@ -85,14 +127,14 @@ func TestRejectLatest(t *testing.T) {
 			maxPayload, wantPayload)
 	}
 
-	// Test encode with latest protocol version.
+	// Test encode for the last protocol version that was supported.
 	var buf bytes.Buffer
 	err := msg.BtcEncode(&buf, pver)
 	if err != nil {
 		t.Errorf("encode of MsgReject failed %v err <%v>", msg, err)
 	}
 
-	// Test decode with latest protocol version.
+	// Test decode for the last protocol version that was supported.
 	readMsg := MsgReject{}
 	err = readMsg.BtcDecode(&buf, pver)
 	if err != nil {
@@ -141,7 +183,7 @@ func TestRejectWire(t *testing.T) {
 				0x74, 0x65, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69,
 				0x6f, 0x6e, // "duplicate version"
 			},
-			ProtocolVersion,
+			RemoveRejectVersion - 1,
 		},
 		// Latest protocol version rejected command block (has hash).
 		{
@@ -161,7 +203,7 @@ func TestRejectWire(t *testing.T) {
 				0x93, 0x1e, 0x83, 0x65, 0xe1, 0x5a, 0x08, 0x9c,
 				0x68, 0xd6, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, // mainNetGenesisHash
 			},
-			ProtocolVersion,
+			RemoveRejectVersion - 1,
 		},
 	}
 
@@ -178,6 +220,14 @@ func TestRejectWire(t *testing.T) {
 			t.Errorf("BtcEncode #%d\n got: %s want: %s", i,
 				spew.Sdump(buf.Bytes()), spew.Sdump(test.buf))
 			continue
+		}
+
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.msg.SerializeSize()
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
 		}
 
 		// Decode the message from wire format.
@@ -197,9 +247,10 @@ func TestRejectWire(t *testing.T) {
 }
 
 // TestRejectWireErrors performs negative tests against wire encode and decode
-// of MsgReject to confirm error paths work correctly.
+// of MsgReject as of the last protocol version it was supported to confirm
+// error paths work correctly.
 func TestRejectWireErrors(t *testing.T) {
-	pver := ProtocolVersion
+	pver := RemoveRejectVersion - 1
 
 	baseReject := NewMsgReject("block", RejectDuplicate, "duplicate block")
 	baseReject.Hash = mainNetGenesisHash
@@ -238,40 +289,20 @@ func TestRejectWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.writeErr) {
-			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
-				i, err, test.writeErr)
+		if !errors.Is(err, test.writeErr) {
+			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v", i, err,
+				test.writeErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.writeErr {
-				t.Errorf("BtcEncode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.writeErr)
-				continue
-			}
 		}
 
 		// Decode from wire format.
 		var msg MsgReject
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, test.readErr)
+		if !errors.Is(err, test.readErr) {
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.readErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
-				t.Errorf("BtcDecode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.readErr)
-				continue
-			}
 		}
 	}
 }

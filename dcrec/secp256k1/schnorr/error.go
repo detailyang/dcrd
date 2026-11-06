@@ -1,96 +1,72 @@
 // Copyright (c) 2014 Conformal Systems LLC.
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package schnorr
 
-import (
-	"fmt"
-)
-
-// ErrorCode identifies a kind of error.
-type ErrorCode int
+// ErrorKind identifies a kind of error.  It has full support for errors.Is
+// and errors.As, so the caller can directly check against an error kind
+// when determining the reason for an error.
+type ErrorKind string
 
 // These constants are used to identify a specific RuleError.
 const (
-	// ErrBadInputSize indicates that input to a signature was of the wrong size.
-	ErrBadInputSize = iota
+	// ErrInvalidHashLen indicates that the input hash to sign or verify is not
+	// the required length.
+	ErrInvalidHashLen = ErrorKind("ErrInvalidHashLen")
 
-	// ErrInputValue indicates that the value of an input was wrong (e.g. zero).
-	ErrInputValue
+	// ErrPrivateKeyIsZero indicates an attempt was made to sign a message with
+	// a private key that is equal to zero.
+	ErrPrivateKeyIsZero = ErrorKind("ErrPrivateKeyIsZero")
 
-	// ErrSchnorrHashValue indicates that the hash of (R || m) was too large
-	// and so a new k value (nonce) should be used.
-	ErrSchnorrHashValue
+	// ErrSchnorrHashValue indicates that the hash of (R || m) was too large and
+	// so a new nonce should be used.
+	ErrSchnorrHashValue = ErrorKind("ErrSchnorrHashValue")
 
-	// ErrPointNotOnCurve indicates that a point was not on the given
-	// elliptic curve.
-	ErrPointNotOnCurve
+	// ErrPubKeyNotOnCurve indicates that a point was not on the given elliptic
+	// curve.
+	ErrPubKeyNotOnCurve = ErrorKind("ErrPubKeyNotOnCurve")
 
-	// ErrBadSigRYValue indicates that the calculated Y value of R was odd,
-	// which is not allowed.
-	ErrBadSigRYValue
+	// ErrSigRYIsOdd indicates that the calculated Y value of R was odd.
+	ErrSigRYIsOdd = ErrorKind("ErrSigRYIsOdd")
 
-	// ErrBadSigRNotOnCurve indicates that the calculated or given point R for some
+	// ErrSigRNotOnCurve indicates that the calculated or given point R for some
 	// signature was not on the curve.
-	ErrBadSigRNotOnCurve
+	ErrSigRNotOnCurve = ErrorKind("ErrSigRNotOnCurve")
 
 	// ErrUnequalRValues indicates that the calculated point R for some
 	// signature was not the same as the given R value for the signature.
-	ErrUnequalRValues
+	ErrUnequalRValues = ErrorKind("ErrUnequalRValues")
 
-	// ErrRegenerateRPoint indicates that a point could not be regenerated
-	// from r.
-	ErrRegenerateRPoint
+	// ErrSigTooShort is returned when a signature that should be a Schnorr
+	// signature is too short.
+	ErrSigTooShort = ErrorKind("ErrSigTooShort")
 
-	// ErrPubKeyOffCurve indicates that a regenerated pubkey was off the curve.
-	ErrPubKeyOffCurve
+	// ErrSigTooLong is returned when a signature that should be a Schnorr
+	// signature is too long.
+	ErrSigTooLong = ErrorKind("ErrSigTooLong")
 
-	// ErrRegenSig indicates that a regenerated pubkey could not be validated
-	// against the signature.
-	ErrRegenSig
+	// ErrSigRTooBig is returned when a signature has r with a value that is
+	// greater than or equal to the prime of the field underlying the group.
+	ErrSigRTooBig = ErrorKind("ErrSigRTooBig")
 
-	// ErrBadNonce indicates that a generated nonce from some algorithm was
-	// unusable.
-	ErrBadNonce
-
-	// ErrZeroSigS indates a zero signature S value, which is invalid.
-	ErrZeroSigS
-
-	// ErrNonmatchingR indicates that all signatures to be combined in a
-	// threshold signature failed to have a matching R value.
-	ErrNonmatchingR
+	// ErrSigSTooBig is returned when a signature has s with a value that is
+	// greater than or equal to the group order.
+	ErrSigSTooBig = ErrorKind("ErrSigSTooBig")
 )
 
-// Map of ErrorCode values back to their constant names for pretty printing.
-var errorCodeStrings = map[ErrorCode]string{
-	ErrBadInputSize:      "BadInputSize",
-	ErrInputValue:        "ErrInputValue",
-	ErrSchnorrHashValue:  "ErrSchnorrHashValue",
-	ErrPointNotOnCurve:   "ErrPointNotOnCurve",
-	ErrBadSigRYValue:     "ErrBadSigRYValue",
-	ErrBadSigRNotOnCurve: "ErrBadSigRNotOnCurve",
-	ErrRegenerateRPoint:  "ErrRegenerateRPoint",
-	ErrPubKeyOffCurve:    "ErrPubKeyOffCurve",
-	ErrRegenSig:          "ErrRegenSig",
-	ErrBadNonce:          "ErrBadNonce",
-	ErrZeroSigS:          "ErrZeroSigS",
-	ErrNonmatchingR:      "ErrNonmatchingR",
+// Error satisfies the error interface and prints human-readable errors.
+func (e ErrorKind) Error() string {
+	return string(e)
 }
 
-// String returns the ErrorCode as a human-readable name.
-func (e ErrorCode) String() string {
-	if s := errorCodeStrings[e]; s != "" {
-		return s
-	}
-	return fmt.Sprintf("Unknown ErrorCode (%d)", int(e))
-}
-
-// Error identifies a violation.
+// Error identifies an error related to a schnorr signature. It has full
+// support for errors.Is and errors.As, so the caller can ascertain the
+// specific reason for the error by checking the underlying error.
 type Error struct {
-	ErrorCode   ErrorCode // Describes the kind of error
-	Description string    // Human readable description of the issue
+	Err         error
+	Description string
 }
 
 // Error satisfies the error interface and prints human-readable errors.
@@ -98,12 +74,12 @@ func (e Error) Error() string {
 	return e.Description
 }
 
-// GetCode satisfies the error interface and prints human-readable errors.
-func (e Error) GetCode() ErrorCode {
-	return e.ErrorCode
+// Unwrap returns the underlying wrapped error.
+func (e Error) Unwrap() error {
+	return e.Err
 }
 
-// schnorrError creates a Error given a set of arguments.
-func schnorrError(c ErrorCode, desc string) Error {
-	return Error{ErrorCode: c, Description: desc}
+// signatureError creates an Error given a set of arguments.
+func signatureError(kind ErrorKind, desc string) Error {
+	return Error{Err: kind, Description: desc}
 }

@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2017 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -60,7 +60,6 @@ type MsgBlock struct {
 func (msg *MsgBlock) AddTransaction(tx *MsgTx) error {
 	msg.Transactions = append(msg.Transactions, tx)
 	return nil
-
 }
 
 // AddSTransaction adds a stake transaction to the message.
@@ -79,11 +78,12 @@ func (msg *MsgBlock) ClearSTransactions() {
 	msg.STransactions = make([]*MsgTx, 0, defaultTransactionAlloc)
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 // See Deserialize for decoding blocks stored to disk, such as in a database, as
 // opposed to decoding blocks from the wire.
 func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgBlock.BtcDecode"
 	err := readBlockHeader(r, pver, &msg.Header)
 	if err != nil {
 		return err
@@ -100,9 +100,9 @@ func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32) error {
 	// a sane upper bound on this count.
 	maxTxPerTree := MaxTxPerTxTree(pver)
 	if txCount > maxTxPerTree {
-		str := fmt.Sprintf("too many transactions to fit into a block "+
+		msg := fmt.Sprintf("too many transactions to fit into a block "+
 			"[count %d, max %d]", txCount, maxTxPerTree)
-		return messageError("MsgBlock.BtcDecode", str)
+		return messageError(op, ErrTooManyTxs, msg)
 	}
 
 	msg.Transactions = make([]*MsgTx, 0, txCount)
@@ -124,9 +124,9 @@ func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32) error {
 		return err
 	}
 	if stakeTxCount > maxTxPerTree {
-		str := fmt.Sprintf("too many stransactions to fit into a block "+
+		msg := fmt.Sprintf("too many stransactions to fit into a block "+
 			"[count %d, max %d]", stakeTxCount, maxTxPerTree)
-		return messageError("MsgBlock.BtcDecode", str)
+		return messageError(op, ErrTooManyTxs, msg)
 	}
 
 	msg.STransactions = make([]*MsgTx, 0, stakeTxCount)
@@ -145,7 +145,7 @@ func (msg *MsgBlock) BtcDecode(r io.Reader, pver uint32) error {
 // Deserialize decodes a block from r into the receiver using a format that is
 // suitable for long-term storage such as a database while respecting the
 // Version field in the block.  This function differs from BtcDecode in that
-// BtcDecode decodes from the decred wire protocol as it was sent across the
+// BtcDecode decodes from the Decred wire protocol as it was sent across the
 // network.  The wire encoding can technically differ depending on the protocol
 // version and doesn't even really need to match the format of a stored block at
 // all.  As of the time this comment was written, the encoded block is the same
@@ -169,6 +169,7 @@ func (msg *MsgBlock) FromBytes(b []byte) error {
 // start and length of each transaction within the raw data that is being
 // deserialized.
 func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, []TxLoc, error) {
+	const op = "MsgBlock.DeserializeTxLoc"
 	fullLen := r.Len()
 
 	// At the current time, there is no difference between the wire encoding
@@ -191,9 +192,9 @@ func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, []TxLoc, error)
 	// since it is in terms of the largest possible block size.
 	maxTxPerTree := MaxTxPerTxTree(ProtocolVersion)
 	if txCount > maxTxPerTree {
-		str := fmt.Sprintf("too many transactions to fit into a block "+
+		msg := fmt.Sprintf("too many transactions to fit into a block "+
 			"[count %d, max %d]", txCount, maxTxPerTree)
-		return nil, nil, messageError("MsgBlock.DeserializeTxLoc", str)
+		return nil, nil, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// Deserialize each transaction while keeping track of its location
@@ -223,9 +224,9 @@ func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, []TxLoc, error)
 	// NOTE: This is using the constant for the latest protocol version
 	// since it is in terms of the largest possible block size.
 	if stakeTxCount > maxTxPerTree {
-		str := fmt.Sprintf("too many transactions to fit into a stake tx tree "+
+		msg := fmt.Sprintf("too many transactions to fit into a stake tx tree "+
 			"[count %d, max %d]", stakeTxCount, maxTxPerTree)
-		return nil, nil, messageError("MsgBlock.DeserializeTxLoc", str)
+		return nil, nil, messageError(op, ErrTooManyTxs, msg)
 	}
 
 	// Deserialize each transaction while keeping track of its location
@@ -246,7 +247,7 @@ func (msg *MsgBlock) DeserializeTxLoc(r *bytes.Buffer) ([]TxLoc, []TxLoc, error)
 	return txLocs, sTxLocs, nil
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 // See Serialize for encoding blocks to be stored to disk, such as in a
 // database, as opposed to encoding blocks for the wire.
@@ -286,7 +287,7 @@ func (msg *MsgBlock) BtcEncode(w io.Writer, pver uint32) error {
 // Serialize encodes the block to w using a format that suitable for long-term
 // storage such as a database while respecting the Version field in the block.
 // This function differs from BtcEncode in that BtcEncode encodes the block to
-// the decred wire protocol in order to be sent across the network.  The wire
+// the Decred wire protocol in order to be sent across the network.  The wire
 // encoding can technically differ depending on the protocol version and doesn't
 // even really need to match the format of a stored block at all.  As of the
 // time this comment was written, the encoded block is the same in both
@@ -310,7 +311,7 @@ func (msg *MsgBlock) Bytes() ([]byte, error) {
 }
 
 // SerializeSize returns the number of bytes it would take to serialize the
-// the block.
+// block.  This is part of the Message interface implementation.
 func (msg *MsgBlock) SerializeSize() int {
 	// Check to make sure that all transactions have the correct
 	// type and version to be included in a block.
@@ -358,6 +359,21 @@ func (msg *MsgBlock) BlockHash() chainhash.Hash {
 	return msg.Header.BlockHash()
 }
 
+// PowHashV1 calculates and returns the version 1 proof of work hash for the
+// block.
+//
+// NOTE: This is the original proof of work hash that was used at Decred launch
+// and applies to all blocks prior to the activation of DCP0011.
+func (msg *MsgBlock) PowHashV1() chainhash.Hash {
+	return msg.Header.PowHashV1()
+}
+
+// PowHashV2 calculates and returns the version 2 proof of work hash as defined
+// in DCP0011 for the block.
+func (msg *MsgBlock) PowHashV2() chainhash.Hash {
+	return msg.Header.PowHashV2()
+}
+
 // TxHashes returns a slice of hashes of all of transactions in this block.
 func (msg *MsgBlock) TxHashes() []chainhash.Hash {
 	hashList := make([]chainhash.Hash, 0, len(msg.Transactions))
@@ -377,7 +393,7 @@ func (msg *MsgBlock) STxHashes() []chainhash.Hash {
 	return hashList
 }
 
-// NewMsgBlock returns a new decred block message that conforms to the
+// NewMsgBlock returns a new Decred block message that conforms to the
 // Message interface.  See MsgBlock for details.
 func NewMsgBlock(blockHeader *BlockHeader) *MsgBlock {
 	return &MsgBlock{

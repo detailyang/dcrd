@@ -1,12 +1,11 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package wire
 
 import (
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -17,24 +16,16 @@ import (
 // a TCP address as required.
 var ErrInvalidNetAddr = errors.New("provided net.Addr is not a net.TCPAddr")
 
-// maxNetAddressPayload returns the max payload size for a decred NetAddress
-// based on the protocol version.
-func maxNetAddressPayload(pver uint32) uint32 {
-	// Services 8 bytes + ip 16 bytes + port 2 bytes.
-	plen := uint32(26)
-
-	// Timestamp 4 bytes.
-	plen += 4
-
-	return plen
-}
+// maxNetAddressPayload returns the max payload size for a NetAddress.
+// Timestamp 4 bytes + services 8 bytes + ip 16 bytes + port 2 bytes.
+const maxNetAddressPayload = 30
 
 // NetAddress defines information about a peer on the network including the time
 // it was last seen, the services it supports, its IP address, and port.
 type NetAddress struct {
 	// Last time the address was seen.  This is, unfortunately, encoded as a
 	// uint32 on the wire and therefore is limited to 2106.  This field is
-	// not present in the decred version message (MsgVersion) nor was it
+	// not present in the Decred version message (MsgVersion) nor was it
 	// added until protocol version >= NetAddressTimeVersion.
 	Timestamp time.Time
 
@@ -58,6 +49,21 @@ func (na *NetAddress) HasService(service ServiceFlag) bool {
 // message.
 func (na *NetAddress) AddService(service ServiceFlag) {
 	na.Services |= service
+}
+
+// SerializeSize returns the number of bytes it would take to serialize the
+// network address.  The ts flag indicates whether or not the timestamp is
+// included in the encoding.
+func (na *NetAddress) SerializeSize(ts bool) int {
+	// Services 8 bytes + ip 16 bytes + port 2 bytes.
+	n := 8 + 16 + 2
+
+	// Timestamp 4 bytes.
+	if ts {
+		n += 4
+	}
+
+	return n
 }
 
 // NewNetAddressIPPort returns a new NetAddress using the provided IP, port, and
@@ -103,7 +109,7 @@ func NewNetAddress(addr net.Addr, services ServiceFlag) (*NetAddress, error) {
 func readNetAddress(r io.Reader, pver uint32, na *NetAddress, ts bool) error {
 	var ip [16]byte
 
-	// NOTE: The decred protocol uses a uint32 for the timestamp so it will
+	// NOTE: The Decred protocol uses a uint32 for the timestamp so it will
 	// stop working somewhere around 2106.  Also timestamp wasn't added until
 	// protocol version >= NetAddressTimeVersion
 	if ts {
@@ -118,7 +124,8 @@ func readNetAddress(r io.Reader, pver uint32, na *NetAddress, ts bool) error {
 		return err
 	}
 	// Sigh.  Decred protocol mixes little and big endian.
-	port, err := binarySerializer.Uint16(r, bigEndian)
+	var port uint16
+	err = readUint16BE(r, &port)
 	if err != nil {
 		return err
 	}
@@ -136,26 +143,31 @@ func readNetAddress(r io.Reader, pver uint32, na *NetAddress, ts bool) error {
 // version and whether or not the timestamp is included per ts.  Some messages
 // like version do not include the timestamp.
 func writeNetAddress(w io.Writer, pver uint32, na *NetAddress, ts bool) error {
-	// NOTE: The decred protocol uses a uint32 for the timestamp so it will
-	// stop working somewhere around 2106.  Also timestamp wasn't added until
-	// until protocol version >= NetAddressTimeVersion.
+	var elems struct {
+		ts uint32
+		ip [16]byte
+	}
+
+	// NOTE: The Decred protocol uses a uint32 for the timestamp so it will stop
+	// working somewhere around 2106.  Also timestamp wasn't added until
+	// protocol version >= NetAddressTimeVersion.
 	if ts {
-		err := writeElement(w, uint32(na.Timestamp.Unix()))
+		elems.ts = uint32(na.Timestamp.Unix())
+		err := writeElement(w, &elems.ts)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Ensure to always write 16 bytes even if the ip is nil.
-	var ip [16]byte
 	if na.IP != nil {
-		copy(ip[:], na.IP.To16())
+		copy(elems.ip[:], na.IP.To16())
 	}
-	err := writeElements(w, na.Services, ip)
+	err := writeElements(w, &na.Services, &elems.ip)
 	if err != nil {
 		return err
 	}
 
 	// Sigh.  Decred protocol mixes little and big endian.
-	return binary.Write(w, bigEndian, na.Port)
+	return writeUint16BE(w, na.Port)
 }

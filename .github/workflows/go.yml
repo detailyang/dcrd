@@ -1,0 +1,61 @@
+name: Build and Test
+on: [push, pull_request]
+permissions:
+  contents: read
+
+jobs:
+  resolve-modules:
+    name: Resolve Go modules
+    runs-on: ubuntu-latest
+    outputs:
+      module_dirs: ${{ steps.resolve_module_dirs.outputs.module_dirs }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve go module directories
+        id: resolve_module_dirs
+        run: |
+          echo "Resolving modules in $(pwd)" && \
+          MODPATHS=$(find . \( -path ./*/internal/_asm -prune \) -o -type f -name go.mod -printf '"%h",') && \
+          echo "module_dirs=[${MODPATHS%,}]" >> $GITHUB_OUTPUT
+  build:
+    name: Go CI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go: ["1.26", "1.27"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Stablilize testdata timestamps
+        run: |
+          bash ./.github/stablilize_testdata_timestamps.sh "${{ github.workspace }}"
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: |
+          sh ./run_tests.sh
+  lint:
+    name: Lint
+    needs: resolve-modules
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module_dirs: ${{ fromJson(needs.resolve-modules.outputs.module_dirs ) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          install-mode: "goinstall"
+          version: 6d2288e072e6f9c9bca28180cae9ce58a049c912 # v2.13.1
+          working-directory: ${{ matrix.module_dirs }}

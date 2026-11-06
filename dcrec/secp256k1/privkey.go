@@ -1,116 +1,111 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2024 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
 package secp256k1
 
 import (
-	"crypto/ecdsa"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"io"
-	"math/big"
 )
 
-// PrivateKey wraps an ecdsa.PrivateKey as a convenience mainly for signing
-// things with the the private key without having to directly import the ecdsa
-// package.
-type PrivateKey ecdsa.PrivateKey
+// PrivateKey provides facilities for working with secp256k1 private keys within
+// this package and includes functionality such as serializing and parsing them
+// as well as computing their associated public key.
+type PrivateKey struct {
+	Key ModNScalar
+}
 
 // NewPrivateKey instantiates a new private key from a scalar encoded as a
 // big integer.
-func NewPrivateKey(curve *KoblitzCurve, d *big.Int) *PrivateKey {
-	b := make([]byte, 0, PrivKeyBytesLen)
-	dB := paddedAppend(PrivKeyBytesLen, b, d.Bytes())
-	priv, _ := PrivKeyFromBytes(curve, dB)
-	return priv
+func NewPrivateKey(key *ModNScalar) *PrivateKey {
+	return &PrivateKey{Key: *key}
 }
 
-// PrivKeyFromBytes returns a private and public key for `curve' based on the
-// private key passed as an argument as a byte slice.
-func PrivKeyFromBytes(curve *KoblitzCurve, pk []byte) (*PrivateKey,
-	*PublicKey) {
-	x, y := curve.ScalarBaseMult(pk)
+// PrivKeyFromBytes returns a private based on the provided byte slice which is
+// interpreted as an unsigned 256-bit big-endian integer in the range [0, N-1],
+// where N is the order of the curve.
+//
+// WARNING: This means passing a slice with more than 32 bytes is truncated and
+// that truncated value is reduced modulo N.  Further, 0 is not a valid private
+// key.  It is up to the caller to provide a value in the appropriate range of
+// [1, N-1].  Failure to do so will either result in an invalid private key or
+// potentially weak private keys that have bias that could be exploited.
+//
+// This function primarily exists to provide a mechanism for converting
+// serialized private keys that are already known to be good.
+//
+// Typically callers should make use of GeneratePrivateKey or
+// GeneratePrivateKeyFromRand when creating private keys since they properly
+// handle generation of appropriate values.
+func PrivKeyFromBytes(privKeyBytes []byte) *PrivateKey {
+	var privKey PrivateKey
+	privKey.Key.SetByteSlice(privKeyBytes)
+	return &privKey
+}
 
-	priv := &ecdsa.PrivateKey{
-		PublicKey: ecdsa.PublicKey{
-			Curve: curve,
-			X:     x,
-			Y:     y,
-		},
-		D: new(big.Int).SetBytes(pk),
+// generatePrivateKey generates and returns a new private key that is suitable
+// for use with secp256k1 using the provided reader as a source of entropy.  The
+// provided reader must be a source of cryptographically secure randomness to
+// avoid weak private keys.
+func generatePrivateKey(rand io.Reader) (*PrivateKey, error) {
+	// The group order is close enough to 2^256 that there is only roughly a 1
+	// in 2^128 chance of generating an invalid private key, so this loop will
+	// virtually never run more than a single iteration in practice.
+	var key PrivateKey
+	var b32 [32]byte
+	for valid := false; !valid; {
+		if _, err := io.ReadFull(rand, b32[:]); err != nil {
+			return nil, err
+		}
+
+		// The private key is only valid when it is in the range [1, N-1], where
+		// N is the order of the curve.
+		overflow := key.Key.SetBytes(&b32)
+		valid = (key.Key.IsZeroBit() | overflow) == 0
 	}
+	zeroArray32(&b32)
 
-	return (*PrivateKey)(priv), (*PublicKey)(&priv.PublicKey)
+	return &key, nil
 }
 
-// PrivKeyFromScalar is the same as PrivKeyFromBytes in secp256k1.
-func PrivKeyFromScalar(curve *KoblitzCurve, s []byte) (*PrivateKey,
-	*PublicKey) {
-	return PrivKeyFromBytes(curve, s)
+// GeneratePrivateKey generates and returns a new cryptographically secure
+// private key that is suitable for use with secp256k1.
+func GeneratePrivateKey() (*PrivateKey, error) {
+	return generatePrivateKey(cryptorand.Reader)
 }
 
-// GeneratePrivateKey is a wrapper for ecdsa.GenerateKey that returns a PrivateKey
-// instead of the normal ecdsa.PrivateKey.
-func GeneratePrivateKey(curve *KoblitzCurve) (*PrivateKey, error) {
-	key, err := ecdsa.GenerateKey(curve, rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	return (*PrivateKey)(key), nil
+// GeneratePrivateKeyFromRand generates a private key that is suitable for use
+// with secp256k1 using the provided reader as a source of entropy.  The
+// provided reader must be a source of cryptographically secure randomness, such
+// as [crypto/rand.Reader], to avoid weak private keys.
+func GeneratePrivateKeyFromRand(rand io.Reader) (*PrivateKey, error) {
+	return generatePrivateKey(rand)
 }
 
-// GenerateKey generates a key using a random number generator, returning
-// the private scalar and the corresponding public key points.
-func GenerateKey(curve *KoblitzCurve, rand io.Reader) (priv []byte, x,
-	y *big.Int, err error) {
-	key, err := ecdsa.GenerateKey(curve, rand)
-	priv = key.D.Bytes()
-	x = key.PublicKey.X
-	y = key.PublicKey.Y
-
-	return
+// PubKey computes and returns the public key corresponding to this private key.
+func (p *PrivateKey) PubKey() *PublicKey {
+	var result JacobianPoint
+	ScalarBaseMultNonConst(&p.Key, &result)
+	result.ToAffine()
+	return NewPublicKey(&result.X, &result.Y)
 }
 
-// Public returns the PublicKey corresponding to this private key.
-func (p PrivateKey) Public() (*big.Int, *big.Int) {
-	return p.PublicKey.X, p.PublicKey.Y
-}
-
-// ToECDSA returns the private key as a *ecdsa.PrivateKey.
-func (p *PrivateKey) ToECDSA() *ecdsa.PrivateKey {
-	return (*ecdsa.PrivateKey)(p)
-}
-
-// Sign generates an ECDSA signature for the provided hash (which should be the
-// result of hashing a larger message) using the private key. Produced signature
-// is deterministic (same message and same key yield the same signature) and
-// canonical in accordance with RFC6979 and BIP0062.
-func (p *PrivateKey) Sign(hash []byte) (*Signature, error) {
-	return signRFC6979(p, hash)
+// Zero manually clears the memory associated with the private key.  This can be
+// used to explicitly clear key material from memory for enhanced security
+// against memory scraping.
+func (p *PrivateKey) Zero() {
+	p.Key.Zero()
 }
 
 // PrivKeyBytesLen defines the length in bytes of a serialized private key.
 const PrivKeyBytesLen = 32
 
-// Serialize returns the private key number d as a big-endian binary-encoded
+// Serialize returns the private key as a 256-bit big-endian binary-encoded
 // number, padded to a length of 32 bytes.
 func (p PrivateKey) Serialize() []byte {
-	b := make([]byte, 0, PrivKeyBytesLen)
-	return paddedAppend(PrivKeyBytesLen, b, p.ToECDSA().D.Bytes())
-}
-
-// SerializeSecret satisfies the chainec PrivateKey interface.
-func (p PrivateKey) SerializeSecret() []byte {
-	return p.Serialize()
-}
-
-// GetD satisfies the chainec PrivateKey interface.
-func (p PrivateKey) GetD() *big.Int {
-	return p.D
-}
-
-// GetType satisfies the chainec PrivateKey interface.
-func (p PrivateKey) GetType() int {
-	return ecTypeSecp256k1
+	var privKeyBytes [PrivKeyBytesLen]byte
+	p.Key.PutBytes(&privKeyBytes)
+	return privKeyBytes[:]
 }

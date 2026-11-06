@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,6 +7,7 @@ package wire
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -35,14 +36,21 @@ func TestGetHeaders(t *testing.T) {
 	}
 
 	// Ensure max payload is expected value for latest protocol version.
-	// Protocol version 4 bytes + num hashes (varInt) + max block locator
-	// hashes + hash stop.
-	wantPayload := uint32(16045)
+	// Protocol version 4 bytes + num hashes (varInt) 3 bytes + max block
+	// locator hashes + hash stop.
+	wantPayload := uint32(16039)
 	maxPayload := msg.MaxPayloadLength(pver)
 	if maxPayload != wantPayload {
 		t.Errorf("MaxPayloadLength: wrong max payload length for "+
 			"protocol version %d - got %v, want %v", pver,
 			maxPayload, wantPayload)
+	}
+
+	// Ensure max payload length is not more than MaxMessagePayload.
+	if maxPayload > MaxMessagePayload {
+		t.Fatalf("MaxPayloadLength: payload length (%v) for protocol "+
+			"version %d exceeds MaxMessagePayload (%v).", maxPayload, pver,
+			MaxMessagePayload)
 	}
 
 	// Ensure block locator hashes are added properly.
@@ -66,8 +74,6 @@ func TestGetHeaders(t *testing.T) {
 		t.Errorf("AddBlockLocatorHash: expected error on too many " +
 			"block locator hashes not received")
 	}
-
-	return
 }
 
 // TestGetHeadersWire tests the MsgGetHeaders wire encode and decode for various
@@ -172,6 +178,14 @@ func TestGetHeadersWire(t *testing.T) {
 			continue
 		}
 
+		// Ensure the serialize size is the actual encoded size.
+		sz := test.in.SerializeSize()
+		actualSz := len(buf.Bytes())
+		if sz != actualSz {
+			t.Errorf("Wrong serialize size #%d\n got: %d want: %d", i,
+				sz, actualSz)
+		}
+
 		// Decode the message from wire format.
 		var msg MsgGetHeaders
 		rbuf := bytes.NewReader(test.buf)
@@ -195,7 +209,6 @@ func TestGetHeadersWireErrors(t *testing.T) {
 	// specifically here instead of the latest because the test data is
 	// using bytes encoded with that protocol version.
 	pver := uint32(60002)
-	wireErr := &MessageError{}
 
 	// Block 99499 hash.
 	hashStr := "2710f40c87ec93d010a6fd95f42c59a2cbacc60b18cf6b7957535"
@@ -271,7 +284,7 @@ func TestGetHeadersWireErrors(t *testing.T) {
 		// Force error in stop hash.
 		{baseGetHeaders, baseGetHeadersEncoded, pver, 69, io.ErrShortWrite, io.EOF},
 		// Force error with greater than max block locator hashes.
-		{maxGetHeaders, maxGetHeadersEncoded, pver, 7, wireErr, wireErr},
+		{maxGetHeaders, maxGetHeadersEncoded, pver, 7, ErrTooManyLocators, ErrTooManyLocators},
 	}
 
 	t.Logf("Running %d tests", len(tests))
@@ -279,40 +292,20 @@ func TestGetHeadersWireErrors(t *testing.T) {
 		// Encode to wire format.
 		w := newFixedWriter(test.max)
 		err := test.in.BtcEncode(w, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.writeErr) {
-			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v",
-				i, err, test.writeErr)
+		if !errors.Is(err, test.writeErr) {
+			t.Errorf("BtcEncode #%d wrong error got: %v, want: %v", i, err,
+				test.writeErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.writeErr {
-				t.Errorf("BtcEncode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.writeErr)
-				continue
-			}
 		}
 
 		// Decode from wire format.
 		var msg MsgGetHeaders
 		r := newFixedReader(test.max, test.buf)
 		err = msg.BtcDecode(r, test.pver)
-		if reflect.TypeOf(err) != reflect.TypeOf(test.readErr) {
-			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v",
-				i, err, test.readErr)
+		if !errors.Is(err, test.readErr) {
+			t.Errorf("BtcDecode #%d wrong error got: %v, want: %v", i, err,
+				test.readErr)
 			continue
-		}
-
-		// For errors which are not of type MessageError, check them for
-		// equality.
-		if _, ok := err.(*MessageError); !ok {
-			if err != test.readErr {
-				t.Errorf("BtcDecode #%d wrong error got: %v, "+
-					"want: %v", i, err, test.readErr)
-				continue
-			}
 		}
 	}
 }

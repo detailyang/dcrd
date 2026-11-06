@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2016 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -11,10 +11,10 @@ import (
 )
 
 // MaxBlockHeadersPerMsg is the maximum number of block headers that can be in
-// a single decred headers message.
+// a single Decred headers message.
 const MaxBlockHeadersPerMsg = 2000
 
-// MsgHeaders implements the Message interface and represents a decred headers
+// MsgHeaders implements the Message interface and represents a Decred headers
 // message.  It is used to deliver block header information in response
 // to a getheaders message (MsgGetHeaders).  The maximum number of block headers
 // per message is currently 2000.  See MsgGetHeaders for details on requesting
@@ -25,19 +25,21 @@ type MsgHeaders struct {
 
 // AddBlockHeader adds a new block header to the message.
 func (msg *MsgHeaders) AddBlockHeader(bh *BlockHeader) error {
+	const op = "MsgHeaders.AddBlockHeader"
 	if len(msg.Headers)+1 > MaxBlockHeadersPerMsg {
-		str := fmt.Sprintf("too many block headers in message [max %v]",
+		msg := fmt.Sprintf("too many block headers in message [max %v]",
 			MaxBlockHeadersPerMsg)
-		return messageError("MsgHeaders.AddBlockHeader", str)
+		return messageError(op, ErrTooManyHeaders, msg)
 	}
 
 	msg.Headers = append(msg.Headers, bh)
 	return nil
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgHeaders) BtcDecode(r io.Reader, pver uint32) error {
+	const op = "MsgHeaders.BtcDecode"
 	count, err := ReadVarInt(r, pver)
 	if err != nil {
 		return err
@@ -45,9 +47,9 @@ func (msg *MsgHeaders) BtcDecode(r io.Reader, pver uint32) error {
 
 	// Limit to max block headers per message.
 	if count > MaxBlockHeadersPerMsg {
-		str := fmt.Sprintf("too many block headers for message "+
+		msg := fmt.Sprintf("too many block headers for message "+
 			"[count %v, max %v]", count, MaxBlockHeadersPerMsg)
-		return messageError("MsgHeaders.BtcDecode", str)
+		return messageError(op, ErrTooManyHeaders, msg)
 	}
 
 	// Create a contiguous slice of headers to deserialize into in order to
@@ -68,9 +70,9 @@ func (msg *MsgHeaders) BtcDecode(r io.Reader, pver uint32) error {
 
 		// Ensure the transaction count is zero for headers.
 		if txCount > 0 {
-			str := fmt.Sprintf("block headers may not contain "+
-				"transactions [count %v]", txCount)
-			return messageError("MsgHeaders.BtcDecode", str)
+			msg := fmt.Sprintf("block headers may not contain transactions "+
+				"[count %v]", txCount)
+			return messageError(op, ErrHeaderContainsTxs, msg)
 		}
 		msg.AddBlockHeader(bh)
 	}
@@ -78,15 +80,17 @@ func (msg *MsgHeaders) BtcDecode(r io.Reader, pver uint32) error {
 	return nil
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgHeaders) BtcEncode(w io.Writer, pver uint32) error {
+	const op = "MsgHeaders.BtcEncode"
+
 	// Limit to max block headers per message.
 	count := len(msg.Headers)
 	if count > MaxBlockHeadersPerMsg {
-		str := fmt.Sprintf("too many block headers for message "+
+		msg := fmt.Sprintf("too many block headers for message "+
 			"[count %v, max %v]", count, MaxBlockHeadersPerMsg)
-		return messageError("MsgHeaders.BtcEncode", str)
+		return messageError(op, ErrTooManyHeaders, msg)
 	}
 
 	err := WriteVarInt(w, pver, uint64(count))
@@ -122,13 +126,22 @@ func (msg *MsgHeaders) Command() string {
 // MaxPayloadLength returns the maximum length the payload can be for the
 // receiver.  This is part of the Message interface implementation.
 func (msg *MsgHeaders) MaxPayloadLength(pver uint32) uint32 {
-	// Num headers (varInt) + max allowed headers (header length + 1 byte
-	// for the number of transactions which is always 0).
-	return MaxVarIntPayload + ((MaxBlockHeaderPayload + 1) *
-		MaxBlockHeadersPerMsg)
+	// Num headers (varInt) 3 bytes + max allowed headers (header length +
+	// 1 byte for the number of transactions which is always 0).
+	return uint32(VarIntSerializeSize(MaxBlockHeadersPerMsg)) +
+		((MaxBlockHeaderPayload + 1) * MaxBlockHeadersPerMsg)
 }
 
-// NewMsgHeaders returns a new decred headers message that conforms to the
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgHeaders) SerializeSize() int {
+	// Num headers (varInt) + for each header the block header bytes plus
+	// 1 byte for the number of transactions which is always 0.
+	return VarIntSerializeSize(uint64(len(msg.Headers))) +
+		len(msg.Headers)*(blockHeaderLen+1)
+}
+
+// NewMsgHeaders returns a new Decred headers message that conforms to the
 // Message interface.  See MsgHeaders for details.
 func NewMsgHeaders() *MsgHeaders {
 	return &MsgHeaders{

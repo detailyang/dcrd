@@ -73,7 +73,6 @@ func round(f float64) Amount {
 // NewAmount is for specifically for converting DCR to Atoms (atomic units).
 // For creating a new Amount with an int64 value which denotes a quantity of
 // Atoms, do a simple type conversion from type int64 to Amount.
-// See GoDoc for example: http://godoc.org/github.com/decred/dcrd/dcrutil#example-Amount
 func NewAmount(f float64) (Amount, error) {
 	// The amount is only considered invalid if it cannot be represented
 	// as an integer type.  This may happen if f is NaN or +-Infinity.
@@ -102,7 +101,7 @@ func (a Amount) ToCoin() float64 {
 
 // Format formats a monetary amount counted in coin base units as a
 // string for a given unit.  The conversion will succeed for any unit,
-// however, known units will be formated with an appended label describing
+// however, known units will be formatted with an appended label describing
 // the units with SI notation, or "atom" for the base unit.
 func (a Amount) Format(u AmountUnit) string {
 	units := " " + u.String()
@@ -116,7 +115,7 @@ func (a Amount) String() string {
 
 // MulF64 multiplies an Amount by a floating point value.  While this is not
 // an operation that must typically be done by a full node or wallet, it is
-// useful for services that build on top of decred (for example, calculating
+// useful for services that build on top of Decred (for example, calculating
 // a fee by multiplying by a percentage).
 func (a Amount) MulF64(f float64) Amount {
 	return round(float64(a) * f)

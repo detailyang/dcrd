@@ -1,0 +1,49 @@
+version: "2"
+run:
+  timeout: 10m
+  build-tags:
+    - rpctest
+linters:
+  default: none
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - dupword
+    - durationcheck
+    - errchkjson
+    - errorlint
+    - godoclint
+    - govet
+    - grouper
+    - ineffassign
+    - misspell
+    - nilerr
+    - nosprintfhostport
+    - reassign
+    - rowserrcheck
+    - staticcheck
+    - tparallel
+    - unconvert
+    - unused
+    - usetesting
+  exclusions:
+    rules:
+      - linters:
+        - govet
+        text: 'Constant reflect\.Ptr should be inlined'
+  settings:
+    staticcheck:
+      checks:
+          - S1*
+    godoclint:
+      default: none
+      enable:
+        - pkg-doc
+        - start-with-name
+        - deprecated
+        - no-unused-link
+formatters:
+  enable:
+    - gofmt
+    - goimports

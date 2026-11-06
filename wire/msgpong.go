@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -9,9 +9,9 @@ import (
 	"io"
 )
 
-// MsgPong implements the Message interface and represents a decred pong
+// MsgPong implements the Message interface and represents a Decred pong
 // message which is used primarily to confirm that a connection is still valid
-// in response to a decred ping message (MsgPing).
+// in response to a Decred ping message (MsgPing).
 //
 // This message was not added until protocol versions AFTER BIP0031Version.
 type MsgPong struct {
@@ -20,16 +20,16 @@ type MsgPong struct {
 	Nonce uint64
 }
 
-// BtcDecode decodes r using the decred protocol encoding into the receiver.
+// BtcDecode decodes r using the Decred protocol encoding into the receiver.
 // This is part of the Message interface implementation.
 func (msg *MsgPong) BtcDecode(r io.Reader, pver uint32) error {
 	return readElement(r, &msg.Nonce)
 }
 
-// BtcEncode encodes the receiver to w using the decred protocol encoding.
+// BtcEncode encodes the receiver to w using the Decred protocol encoding.
 // This is part of the Message interface implementation.
 func (msg *MsgPong) BtcEncode(w io.Writer, pver uint32) error {
-	return writeElement(w, msg.Nonce)
+	return writeElement(w, &msg.Nonce)
 }
 
 // Command returns the protocol command string for the message.  This is part
@@ -49,7 +49,14 @@ func (msg *MsgPong) MaxPayloadLength(pver uint32) uint32 {
 	return plen
 }
 
-// NewMsgPong returns a new decred pong message that conforms to the Message
+// SerializeSize returns the number of bytes it would take to serialize the
+// message.  This is part of the Message interface implementation.
+func (msg *MsgPong) SerializeSize() int {
+	// Nonce 8 bytes.
+	return 8
+}
+
+// NewMsgPong returns a new Decred pong message that conforms to the Message
 // interface.  See MsgPong for details.
 func NewMsgPong(nonce uint64) *MsgPong {
 	return &MsgPong{

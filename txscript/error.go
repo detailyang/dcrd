@@ -1,5 +1,5 @@
-// Copyright (c) 2013-2015 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2013-2017 The btcsuite developers
+// Copyright (c) 2015-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -7,186 +7,358 @@ package txscript
 
 import (
 	"errors"
-	"fmt"
 )
 
-// Engine execution errors.
-var (
-	// ErrStackShortScript is returned if the script has an opcode that is
-	// too long for the length of the script.
-	ErrStackShortScript = errors.New("execute past end of script")
+// ErrorKind identifies a kind of script error.
+type ErrorKind string
 
-	// ErrStackLongScript is returned if the script has an opcode that is
-	// too long for the length of the script.
-	ErrStackLongScript = errors.New("script is longer than maximum allowed")
+// These constants are used to identify a specific ErrorKind.
+const (
+	// ---------------------------------------
+	// Failures related to improper API usage.
+	// ---------------------------------------
 
-	// ErrStackUnderflow is returned if an opcode requires more items on the
-	// stack than is present.f
-	ErrStackUnderflow = errors.New("stack underflow")
+	// ErrInvalidIndex is returned when an out-of-bounds index is passed to
+	// a function.
+	ErrInvalidIndex = ErrorKind("ErrInvalidIndex")
 
-	// ErrStackInvalidArgs is returned if the argument for an opcode is out
-	// of acceptable range.
-	ErrStackInvalidArgs = errors.New("invalid argument")
+	// ErrInvalidSigHashSingleIndex is returned when an attempt is
+	// made to sign an input with the SigHashSingle hash type and an
+	// index that is greater than or equal to the number of outputs.
+	ErrInvalidSigHashSingleIndex = ErrorKind("ErrInvalidSigHashSingleIndex")
 
-	// ErrStackOpDisabled is returned when a disabled opcode is encountered
-	// in the script.
-	ErrStackOpDisabled = errors.New("disabled opcode")
+	// ErrUnsupportedScriptVersion is returned when an unsupported script
+	// version is passed to a function which deals with script analysis.
+	ErrUnsupportedScriptVersion = ErrorKind("ErrUnsupportedScriptVersion")
 
-	// ErrStackVerifyFailed is returned when one of the OP_VERIFY or
-	// OP_*VERIFY instructions is executed and the conditions fails.
-	ErrStackVerifyFailed = errors.New("verify failed")
+	// ------------------------------------------
+	// Failures related to final execution state.
+	// ------------------------------------------
 
-	// ErrStackNumberTooBig is returned when the argument for an opcode that
-	// should be an offset is obviously far too large.
-	ErrStackNumberTooBig = errors.New("number too big")
+	// ErrEarlyReturn is returned when OP_RETURN is executed in the script.
+	ErrEarlyReturn = ErrorKind("ErrEarlyReturn")
 
-	// ErrStackInvalidOpcode is returned when an opcode marked as invalid or
-	// a completely undefined opcode is encountered.
-	ErrStackInvalidOpcode = errors.New("invalid opcode")
+	// ErrEmptyStack is returned when the script evaluated without error,
+	// but terminated with an empty top stack element.
+	ErrEmptyStack = ErrorKind("ErrEmptyStack")
 
-	// ErrStackReservedOpcode is returned when an opcode marked as reserved
-	// is encountered.
-	ErrStackReservedOpcode = errors.New("reserved opcode")
+	// ErrEvalFalse is returned when the script evaluated without error but
+	// terminated with a false top stack element.
+	ErrEvalFalse = ErrorKind("ErrEvalFalse")
 
-	// ErrStackEarlyReturn is returned when OP_RETURN is executed in the
-	// script.
-	ErrStackEarlyReturn = errors.New("script returned early")
+	// ErrScriptUnfinished is returned when CheckErrorCondition is called on
+	// a script that has not finished executing.
+	ErrScriptUnfinished = ErrorKind("ErrScriptUnfinished")
 
-	// ErrStackNoIf is returned if an OP_ELSE or OP_ENDIF is encountered
-	// without first having an OP_IF or OP_NOTIF in the script.
-	ErrStackNoIf = errors.New("OP_ELSE or OP_ENDIF with no matching OP_IF")
+	// ErrInvalidProgramCounter is returned when an attempt to execute an opcode
+	// is made once all of them have already been executed.  This can happen due
+	// to things such as a second call to Execute or calling Step after all
+	// opcodes have already been executed.
+	ErrInvalidProgramCounter = ErrorKind("ErrInvalidProgramCounter")
 
-	// ErrStackMissingEndif is returned if the end of a script is reached
-	// without and OP_ENDIF to correspond to a conditional expression.
-	ErrStackMissingEndif = fmt.Errorf("execute fail, in conditional execution")
+	// -----------------------------------------------------
+	// Failures related to exceeding maximum allowed limits.
+	// -----------------------------------------------------
 
-	// ErrStackTooManyPubKeys is returned if an OP_CHECKMULTISIG is
-	// encountered with more than MaxPubKeysPerMultiSig pubkeys present.
-	ErrStackTooManyPubKeys = errors.New("invalid pubkey count in OP_CHECKMULTISIG")
+	// ErrScriptTooBig is returned if a script is larger than MaxScriptSize.
+	ErrScriptTooBig = ErrorKind("ErrScriptTooBig")
 
-	// ErrStackTooManyOperations is returned if a script has more than
+	// ErrElementTooBig is returned if the size of an element to be pushed
+	// to the stack is over MaxScriptElementSize.
+	ErrElementTooBig = ErrorKind("ErrElementTooBig")
+
+	// ErrTooManyOperations is returned if a script has more than
 	// MaxOpsPerScript opcodes that do not push data.
-	ErrStackTooManyOperations = errors.New("too many operations in script")
-
-	// ErrStackElementTooBig is returned if the size of an element to be
-	// pushed to the stack is over MaxScriptElementSize.
-	ErrStackElementTooBig = errors.New("element in script too large")
-
-	// ErrStackUnknownAddress is returned when ScriptToAddrHash does not
-	// recognize the pattern of the script and thus can not find the address
-	// for payment.
-	ErrStackUnknownAddress = errors.New("non-recognised address")
-
-	// ErrStackScriptFailed is returned when at the end of a script the
-	// boolean on top of the stack is false signifying that the script has
-	// failed.
-	ErrStackScriptFailed = errors.New("execute fail, fail on stack")
-
-	// ErrStackScriptUnfinished is returned when CheckErrorCondition is
-	// called on a script that has not finished executing.
-	ErrStackScriptUnfinished = errors.New("error check when script unfinished")
-
-	// ErrStackEmptyStack is returned when the stack is empty at the end of
-	// execution. Normal operation requires that a boolean is on top of the
-	// stack when the scripts have finished executing.
-	ErrStackEmptyStack = errors.New("stack empty at end of execution")
-
-	// ErrStackP2SHNonPushOnly is returned when a Pay-to-Script-Hash
-	// transaction is encountered and the ScriptSig does operations other
-	// than push data (in violation of bip16).
-	ErrStackP2SHNonPushOnly = errors.New("pay to script hash with non " +
-		"pushonly input")
-
-	// ErrStackInvalidParseType is an internal error returned from
-	// ScriptToAddrHash ony if the internal data tables are wrong.
-	ErrStackInvalidParseType = errors.New("internal error: invalid parsetype found")
-
-	// ErrStackInvalidAddrOffset is an internal error returned from
-	// ScriptToAddrHash ony if the internal data tables are wrong.
-	ErrStackInvalidAddrOffset = errors.New("internal error: invalid offset found")
-
-	// ErrStackInvalidIndex is returned when an out-of-bounds index was
-	// passed to a function.
-	ErrStackInvalidIndex = errors.New("invalid script index")
-
-	// ErrStackNonPushOnly is returned when ScriptInfo is called with a
-	// pkScript that peforms operations other that pushing data to the stack.
-	ErrStackNonPushOnly = errors.New("SigScript is non pushonly")
+	ErrTooManyOperations = ErrorKind("ErrTooManyOperations")
 
 	// ErrStackOverflow is returned when stack and altstack combined depth
 	// is over the limit.
-	ErrStackOverflow = errors.New("stack overflow")
+	ErrStackOverflow = ErrorKind("ErrStackOverflow")
 
-	// ErrStackInvalidLowSSignature is returned when the ScriptVerifyLowS
-	// flag is set and the script contains any signatures whose S values
-	// are higher than the half order.
-	ErrStackInvalidLowSSignature = errors.New("invalid low s signature")
+	// ErrInvalidPubKeyCount is returned when the number of public keys
+	// specified for a multsig is either negative or greater than
+	// MaxPubKeysPerMultiSig.
+	ErrInvalidPubKeyCount = ErrorKind("ErrInvalidPubKeyCount")
 
-	// ErrStackInvalidPubKey is returned when the ScriptVerifyScriptEncoding
-	// flag is set and the script contains invalid pubkeys.
-	ErrStackInvalidPubKey = errors.New("invalid strict pubkey")
+	// ErrInvalidSignatureCount is returned when the number of signatures
+	// specified for a multisig is either negative or greater than the
+	// number of public keys.
+	ErrInvalidSignatureCount = ErrorKind("ErrInvalidSignatureCount")
 
-	// ErrStackCleanStack is returned when the ScriptVerifyCleanStack flag
-	// is set and after evalution the stack does not contain only one element,
-	// which also must be true if interpreted as a boolean.
-	ErrStackCleanStack = errors.New("stack is not clean")
+	// ErrNumOutOfRange is returned when the argument for an opcode that
+	// expects numeric input is larger than the expected maximum number of
+	// bytes.  For the most part, opcodes that deal with stack manipulation
+	// via offsets, arithmetic, numeric comparison, and boolean logic are
+	// those that this applies to.  However, any opcode that expects numeric
+	// input may fail with this error.
+	ErrNumOutOfRange = ErrorKind("ErrNumOutOfRange")
 
-	// ErrStackMinimalData is returned when the ScriptVerifyMinimalData flag
-	// is set and the script contains push operations that do not use
-	// the minimal opcode required.
-	ErrStackMinimalData = errors.New("non-minimally encoded script number")
+	// --------------------------------------------
+	// Failures related to verification operations.
+	// --------------------------------------------
+
+	// ErrVerify is returned when OP_VERIFY is encountered in a script and
+	// the top item on the data stack does not evaluate to true.
+	ErrVerify = ErrorKind("ErrVerify")
+
+	// ErrEqualVerify is returned when OP_EQUALVERIFY is encountered in a
+	// script and the top item on the data stack does not evaluate to true.
+	ErrEqualVerify = ErrorKind("ErrEqualVerify")
+
+	// ErrNumEqualVerify is returned when OP_NUMEQUALVERIFY is encountered
+	// in a script and the top item on the data stack does not evaluate to
+	// true.
+	ErrNumEqualVerify = ErrorKind("ErrNumEqualVerify")
+
+	// ErrCheckSigVerify is returned when OP_CHECKSIGVERIFY is encountered
+	// in a script and the top item on the data stack does not evaluate to
+	// true.
+	ErrCheckSigVerify = ErrorKind("ErrCheckSigVerify")
+
+	// ErrCheckMultiSigVerify is returned when OP_CHECKMULTISIGVERIFY is
+	// encountered in a script and the top item on the data stack does not
+	// evaluate to true.
+	ErrCheckMultiSigVerify = ErrorKind("ErrCheckMultiSigVerify")
+
+	// ErrCheckSigAltVerify is returned when OP_CHECKSIGALTVERIFY is
+	// encountered in a script and the top item on the data stack does not
+	// evaluate to true.
+	ErrCheckSigAltVerify = ErrorKind("ErrCheckSigAltVerify")
+
+	// --------------------------------------------
+	// Failures related to improper use of opcodes.
+	// --------------------------------------------
+
+	// ErrP2SHStakeOpCodes is returned when one or more stake opcodes are
+	// found in the redeem script of a pay-to-script-hash script.
+	ErrP2SHStakeOpCodes = ErrorKind("ErrP2SHStakeOpCodes")
+
+	// ErrDisabledOpcode is returned when a disabled opcode is encountered
+	// in a script.
+	ErrDisabledOpcode = ErrorKind("ErrDisabledOpcode")
+
+	// ErrReservedOpcode is returned when an opcode marked as reserved
+	// is encountered in a script.
+	ErrReservedOpcode = ErrorKind("ErrReservedOpcode")
+
+	// ErrMalformedPush is returned when a data push opcode tries to push
+	// more bytes than are left in the script.
+	ErrMalformedPush = ErrorKind("ErrMalformedPush")
+
+	// ErrInvalidStackOperation is returned when a stack operation is
+	// attempted with a number that is invalid for the current stack size.
+	ErrInvalidStackOperation = ErrorKind("ErrInvalidStackOperation")
+
+	// ErrUnbalancedConditional is returned when an OP_ELSE or OP_ENDIF is
+	// encountered in a script without first having an OP_IF or OP_NOTIF or
+	// the end of script is reached without encountering an OP_ENDIF when
+	// an OP_IF or OP_NOTIF was previously encountered.
+	ErrUnbalancedConditional = ErrorKind("ErrUnbalancedConditional")
+
+	// ErrNegativeSubstrIdx is returned when an OP_SUBSTR, OP_LEFT, or
+	// OP_RIGHT opcode encounters a negative index.
+	ErrNegativeSubstrIdx = ErrorKind("ErrNegativeSubstrIdx")
+
+	// ErrOverflowSubstrIdx is returned when an OP_SUBSTR, OP_LEFT, or
+	// OP_RIGHT opcode encounters an index that is larger than the max
+	// allowed index that can operate on the string or the start index
+	// is greater than the end index for OP_SUBSTR.
+	ErrOverflowSubstrIdx = ErrorKind("ErrOverflowSubstrIdx")
+
+	// ErrNegativeRotation is returned when an OP_ROTL or OP_ROTR attempts
+	// to perform a rotation with a negative rotation count.
+	ErrNegativeRotation = ErrorKind("ErrNegativeRotation")
+
+	// ErrOverflowRotation is returned when an OP_ROTL or OP_ROTR opcode
+	// encounters a rotation count that is larger than the maximum allowed
+	// value for a uint32 bit rotation.
+	ErrOverflowRotation = ErrorKind("ErrOverflowRotation")
+
+	// ErrDivideByZero is returned when an OP_DIV of OP_MOD attempts to
+	// divide by zero.
+	ErrDivideByZero = ErrorKind("ErrDivideByZero")
+
+	// ErrNegativeShift is returned when an OP_LSHIFT or OP_RSHIFT opcode
+	// attempts to perform a shift with a negative count.
+	ErrNegativeShift = ErrorKind("ErrNegativeShift")
+
+	// ErrOverflowShift is returned when an OP_LSHIFT or OP_RSHIFT opcode
+	// encounters a shift count that is larger than the maximum allowed value
+	// for a shift.
+	ErrOverflowShift = ErrorKind("ErrOverflowShift")
+
+	// ErrP2SHTreasuryOpCodes is returned when one or more treasury opcodes
+	// are found in the redeem script of a pay-to-script-hash script.
+	ErrP2SHTreasuryOpCodes = ErrorKind("ErrP2SHTreasuryOpCodes")
+
+	// ---------------------------------
+	// Failures related to malleability.
+	// ---------------------------------
+
+	// ErrMinimalData is returned when the script contains push operations
+	// that do not use the minimal opcode required.
+	ErrMinimalData = ErrorKind("ErrMinimalData")
+
+	// ErrInvalidSigHashType is returned when a signature hash type is not
+	// one of the supported types.
+	ErrInvalidSigHashType = ErrorKind("ErrInvalidSigHashType")
+
+	// ErrSigTooShort is returned when a signature that should be a
+	// canonically-encoded DER signature is too short.
+	ErrSigTooShort = ErrorKind("ErrSigTooShort")
+
+	// ErrSigTooLong is returned when a signature that should be a
+	// canonically-encoded DER signature is too long.
+	ErrSigTooLong = ErrorKind("ErrSigTooLong")
+
+	// ErrSigInvalidSeqID is returned when a signature that should be a
+	// canonically-encoded DER signature does not have the expected ASN.1
+	// sequence ID.
+	ErrSigInvalidSeqID = ErrorKind("ErrSigInvalidSeqID")
+
+	// ErrSigInvalidDataLen is returned when a signature that should be a
+	// canonically-encoded DER signature does not specify the correct number
+	// of remaining bytes for the R and S portions.
+	ErrSigInvalidDataLen = ErrorKind("ErrSigInvalidDataLen")
+
+	// ErrSigMissingSTypeID is returned when a signature that should be a
+	// canonically-encoded DER signature does not provide the ASN.1 type ID
+	// for S.
+	ErrSigMissingSTypeID = ErrorKind("ErrSigMissingSTypeID")
+
+	// ErrSigMissingSLen is returned when a signature that should be a
+	// canonically-encoded DER signature does not provide the length of S.
+	ErrSigMissingSLen = ErrorKind("ErrSigMissingSLen")
+
+	// ErrSigInvalidSLen is returned when a signature that should be a
+	// canonically-encoded DER signature does not specify the correct number
+	// of bytes for the S portion.
+	ErrSigInvalidSLen = ErrorKind("ErrSigInvalidSLen")
+
+	// ErrSigInvalidRIntID is returned when a signature that should be a
+	// canonically-encoded DER signature does not have the expected ASN.1
+	// integer ID for R.
+	ErrSigInvalidRIntID = ErrorKind("ErrSigInvalidRIntID")
+
+	// ErrSigZeroRLen is returned when a signature that should be a
+	// canonically-encoded DER signature has an R length of zero.
+	ErrSigZeroRLen = ErrorKind("ErrSigZeroRLen")
+
+	// ErrSigNegativeR is returned when a signature that should be a
+	// canonically-encoded DER signature has a negative value for R.
+	ErrSigNegativeR = ErrorKind("ErrSigNegativeR")
+
+	// ErrSigTooMuchRPadding is returned when a signature that should be a
+	// canonically-encoded DER signature has too much padding for R.
+	ErrSigTooMuchRPadding = ErrorKind("ErrSigTooMuchRPadding")
+
+	// ErrSigInvalidSIntID is returned when a signature that should be a
+	// canonically-encoded DER signature does not have the expected ASN.1
+	// integer ID for S.
+	ErrSigInvalidSIntID = ErrorKind("ErrSigInvalidSIntID")
+
+	// ErrSigZeroSLen is returned when a signature that should be a
+	// canonically-encoded DER signature has an S length of zero.
+	ErrSigZeroSLen = ErrorKind("ErrSigZeroSLen")
+
+	// ErrSigNegativeS is returned when a signature that should be a
+	// canonically-encoded DER signature has a negative value for S.
+	ErrSigNegativeS = ErrorKind("ErrSigNegativeS")
+
+	// ErrSigTooMuchSPadding is returned when a signature that should be a
+	// canonically-encoded DER signature has too much padding for S.
+	ErrSigTooMuchSPadding = ErrorKind("ErrSigTooMuchSPadding")
+
+	// ErrSigHighS is returned when a signature that should be a
+	// canonically-encoded DER signature has an S value that is higher than
+	// the curve half order.
+	ErrSigHighS = ErrorKind("ErrSigHighS")
+
+	// ErrNotPushOnly is returned when a script that is required to only
+	// push data to the stack performs other operations.  A couple of cases
+	// where this applies is for a pay-to-script-hash signature script when
+	// bip16 is active and when the ScriptVerifySigPushOnly flag is set.
+	ErrNotPushOnly = ErrorKind("ErrNotPushOnly")
+
+	// ErrPubKeyType is returned when the script contains invalid public keys.
+	ErrPubKeyType = ErrorKind("ErrPubKeyType")
+
+	// ErrCleanStack is returned when the ScriptVerifyCleanStack flag
+	// is set, and after evaluation, the stack does not contain only a
+	// single element.
+	ErrCleanStack = ErrorKind("ErrCleanStack")
+
+	// -------------------------------
+	// Failures related to soft forks.
+	// -------------------------------
+
+	// ErrDiscourageUpgradableNOPs is returned when the
+	// ScriptDiscourageUpgradableNops flag is set and a NOP opcode is
+	// encountered in a script.
+	ErrDiscourageUpgradableNOPs = ErrorKind("ErrDiscourageUpgradableNOPs")
+
+	// ErrNegativeLockTime is returned when a script contains an opcode that
+	// interprets a negative lock time.
+	ErrNegativeLockTime = ErrorKind("ErrNegativeLockTime")
+
+	// ErrUnsatisfiedLockTime is returned when a script contains an opcode
+	// that involves a lock time and the required lock time has not been
+	// reached.
+	ErrUnsatisfiedLockTime = ErrorKind("ErrUnsatisfiedLockTime")
 )
 
-// Engine script errors.
-var (
-	// ErrInvalidFlags is returned when the passed flags to NewScript
-	// contain an invalid combination.
-	ErrInvalidFlags = errors.New("invalid flags combination")
+// Error satisfies the error interface and prints human-readable errors.
+func (e ErrorKind) Error() string {
+	return string(e)
+}
 
-	// ErrInvalidIndex is returned when the passed input index for the
-	// provided transaction is out of range.
-	ErrInvalidIndex = errors.New("invalid input index")
+// Error identifies a script-related error.  It is used to indicate three
+// classes of errors:
+//  1. Script execution failures due to violating one of the many requirements
+//     imposed by the script engine or evaluating to false
+//  2. Improper API usage by callers
+//  3. Internal consistency check failures
+//
+// It has full support for errors.Is and errors.As, so the caller can ascertain
+// the specific reason for the error by checking the underlying error.
+type Error struct {
+	Err         error
+	Description string
+}
 
-	// ErrUnsupportedAddress is returned when a concrete type that
-	// implements a dcrutil.Address is not a supported type.
-	ErrUnsupportedAddress = errors.New("unsupported address type")
+// Error satisfies the error interface and prints human-readable errors.
+func (e Error) Error() string {
+	return e.Description
+}
 
-	// ErrBadNumRequired is returned from MultiSigScript when nrequired is
-	// larger than the number of provided public keys.
-	ErrBadNumRequired = errors.New("more signatures required than keys present")
+// Unwrap returns the underlying wrapped error.
+func (e Error) Unwrap() error {
+	return e.Err
+}
 
-	// ErrSighashSingleIdx
-	ErrSighashSingleIdx = errors.New("invalid SIGHASH_SINGLE script index")
+// scriptError creates a ScriptError given a set of arguments.
+func scriptError(kind ErrorKind, desc string) Error {
+	return Error{Err: kind, Description: desc}
+}
 
-	// ErrSubstrIndexNegative indicates that the substring index was negative
-	// and thus invalid.
-	ErrSubstrIdxNegative = errors.New("negative number given for substring " +
-		"index")
+// IsDERSigError returns whether or not the provided error is one of the error
+// kinds which are caused due to encountering a signature that is not a
+// canonically-encoded DER signature.
+func IsDERSigError(err error) bool {
+	var kind ErrorKind
+	if !errors.As(err, &kind) {
+		return false
+	}
 
-	// ErrSubstrIdxOutOfBounds indicates that the substring index was too large
-	// and thus invalid.
-	ErrSubstrIdxOutOfBounds = errors.New("out of bounds number given for " +
-		"substring index")
+	switch kind {
+	case ErrSigTooShort, ErrSigTooLong, ErrSigInvalidSeqID,
+		ErrSigInvalidDataLen, ErrSigMissingSTypeID, ErrSigMissingSLen,
+		ErrSigInvalidSLen, ErrSigInvalidRIntID, ErrSigZeroRLen, ErrSigNegativeR,
+		ErrSigTooMuchRPadding, ErrSigInvalidSIntID, ErrSigZeroSLen,
+		ErrSigNegativeS, ErrSigTooMuchSPadding, ErrSigHighS:
 
-	// ErrNegativeRotation indicates that too low of a rotation depth was given
-	// for a uint32 bit rotation.
-	ErrNegativeRotation = errors.New("rotation depth negative")
+		return true
+	}
 
-	// ErrRotationOverflow indicates that too high of a rotation depth was given
-	// for a uint32 bit rotation.
-	ErrRotationOverflow = errors.New("rotation depth out of bounds")
-
-	// ErrNegativeRotation indicates that too low of a shift depth was given
-	// for a uint32 bit shift.
-	ErrNegativeShift = errors.New("shift depth negative")
-
-	// ErrShiftOverflow indicates that too high of a shift depth was given
-	// for a uint32 bit shift.
-	ErrShiftOverflow = errors.New("shift depth out of bounds")
-
-	// ErrDivideByZero indicates that a user attempted to divide by zero.
-	ErrDivideByZero = errors.New("division by zero")
-
-	// ErrP2SHStakeOpCodes indicates a P2SH script contained stake op codes.
-	ErrP2SHStakeOpCodes = errors.New("stake opcodes were found in a p2sh script")
-)
+	return false
+}

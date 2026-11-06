@@ -1,34 +1,35 @@
 // Copyright (c) 2015-2016 The btcsuite developers
-// Copyright (c) 2016-2017 The Decred developers
+// Copyright (c) 2016-2026 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
-package peer_test
+package peer
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/btcsuite/go-socks/socks"
-	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
-	"github.com/decred/dcrd/peer"
 	"github.com/decred/dcrd/wire"
+	"github.com/decred/go-socks/socks"
 )
 
 // conn mocks a network connection by implementing the net.Conn interface.  It
 // is used to test peer connection without actually opening a network
 // connection.
 type conn struct {
-	io.Reader
-	io.Writer
-	io.Closer
+	io.ReadCloser
+	io.WriteCloser
 
 	// local network, address for the connection.
 	lnet, laddr string
@@ -36,17 +37,23 @@ type conn struct {
 	// remote network, address for the connection.
 	rnet, raddr string
 
-	// mocks socks proxy if true
+	// mocks socks proxy if true.
 	proxy bool
+
+	// setWriteDeadlineErr is returned by SetWriteDeadline when it is non-nil.
+	setWriteDeadlineErr error
+
+	// writeDeadline stores the most recent deadline set by SetWriteDeadline.
+	writeDeadline time.Time
 }
 
 // LocalAddr returns the local address for the connection.
-func (c conn) LocalAddr() net.Addr {
+func (c *conn) LocalAddr() net.Addr {
 	return &addr{c.lnet, c.laddr}
 }
 
 // Remote returns the remote address for the connection.
-func (c conn) RemoteAddr() net.Addr {
+func (c *conn) RemoteAddr() net.Addr {
 	if !c.proxy {
 		return &addr{c.rnet, c.raddr}
 	}
@@ -60,15 +67,28 @@ func (c conn) RemoteAddr() net.Addr {
 }
 
 // Close handles closing the connection.
-func (c conn) Close() error {
+func (c *conn) Close() error {
+	readCloseErr := c.ReadCloser.Close()
+	writeCloseErr := c.WriteCloser.Close()
+	if readCloseErr != nil {
+		return readCloseErr
+	}
+	return writeCloseErr
+}
+
+func (c *conn) SetDeadline(t time.Time) error     { return nil }
+func (c *conn) SetReadDeadline(t time.Time) error { return nil }
+
+func (c *conn) SetWriteDeadline(t time.Time) error {
+	if c.setWriteDeadlineErr != nil {
+		return c.setWriteDeadlineErr
+	}
+
+	c.writeDeadline = t
 	return nil
 }
 
-func (c conn) SetDeadline(t time.Time) error      { return nil }
-func (c conn) SetReadDeadline(t time.Time) error  { return nil }
-func (c conn) SetWriteDeadline(t time.Time) error { return nil }
-
-// addr mocks a network address
+// addr mocks a network address.
 type addr struct {
 	net, address string
 }
@@ -78,16 +98,23 @@ func (m addr) String() string  { return m.address }
 
 // pipe turns two mock connections into a full-duplex connection similar to
 // net.Pipe to allow pipe's with (fake) addresses.
-func pipe(c1, c2 *conn) (*conn, *conn) {
+func pipe(inAddr, outAddr string) (*conn, *conn) {
 	r1, w1 := io.Pipe()
 	r2, w2 := io.Pipe()
 
-	c1.Writer = w1
-	c2.Reader = r1
-	c1.Reader = r2
-	c2.Writer = w2
-
+	c1 := &conn{laddr: inAddr, raddr: outAddr, WriteCloser: w1, ReadCloser: r2}
+	c2 := &conn{laddr: outAddr, raddr: inAddr, WriteCloser: w2, ReadCloser: r1}
 	return c1, c2
+}
+
+// mockPeerConfig returns a base mock peer config to use throughout the tests.
+func mockPeerConfig() *Config {
+	return &Config{
+		UserAgentName:    "peer",
+		UserAgentVersion: "1.0",
+		Net:              wire.MainNet,
+		Services:         wire.SFNodeNetwork,
+	}
 }
 
 // peerStats holds the expected peer stats used for testing peer.
@@ -96,8 +123,6 @@ type peerStats struct {
 	wantServices        wire.ServiceFlag
 	wantProtocolVersion uint32
 	wantConnected       bool
-	wantVersionKnown    bool
-	wantVerAckReceived  bool
 	wantLastBlock       int64
 	wantStartingHeight  int64
 	wantLastPingTime    time.Time
@@ -108,134 +133,137 @@ type peerStats struct {
 	wantBytesReceived   uint64
 }
 
-// testPeer tests the given peer's flags and stats
-func testPeer(t *testing.T, p *peer.Peer, s peerStats) {
-	if p.UserAgent() != s.wantUserAgent {
-		t.Errorf("testPeer: wrong UserAgent - got %v, want %v", p.UserAgent(), s.wantUserAgent)
-		return
+// runPeersAsync invokes the [Peer.Run] method on the passed peers in separate
+// goroutines and returns a cancelable context and wait group the caller can use
+// to shutdown the peers and wait for clean shutdown.
+func runPeersAsync(peers ...*Peer) (context.CancelFunc, *sync.WaitGroup) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(len(peers))
+	for _, peer := range peers {
+		go func(peer *Peer) {
+			peer.Run(ctx)
+			wg.Done()
+		}(peer)
+	}
+	return cancel, &wg
+}
+
+// runHandshakes performs the initial handshake for all of the passed peers
+// as a group in separate goroutines and returns when they all finish.  If any
+// handshake fails, all of them are stopped and the first non-nil error is
+// returned.
+func runHandshakes(peers ...*Peer) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(len(peers))
+	var errsMtx sync.Mutex
+	errs := make([]error, 0, len(peers))
+	for _, peer := range peers {
+		go func(peer *Peer) {
+			defer wg.Done()
+
+			negotiateCtx, negotiateCancel := context.WithTimeout(ctx, time.Second)
+			defer negotiateCancel()
+
+			err := peer.Handshake(negotiateCtx, nil)
+			if err != nil {
+				cancel()
+				errsMtx.Lock()
+				errs = append(errs, err)
+				errsMtx.Unlock()
+			}
+		}(peer)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// testPeerState ensures the flags and state of the provided peer match the
+// given stats.
+func testPeerState(t *testing.T, p *Peer, s peerStats) {
+	t.Helper()
+
+	if got := p.UserAgent(); got != s.wantUserAgent {
+		t.Fatalf("wrong UserAgent - got %v, want %v", got, s.wantUserAgent)
 	}
 
-	if p.Services() != s.wantServices {
-		t.Errorf("testPeer: wrong Services - got %v, want %v", p.Services(), s.wantServices)
-		return
+	if got := p.Services(); got != s.wantServices {
+		t.Fatalf("wrong Services - got %v, want %v", got, s.wantServices)
 	}
 
-	if !p.LastPingTime().Equal(s.wantLastPingTime) {
-		t.Errorf("testPeer: wrong LastPingTime - got %v, want %v", p.LastPingTime(), s.wantLastPingTime)
-		return
+	if got := p.LastPingTime(); !got.Equal(s.wantLastPingTime) {
+		t.Fatalf("wrong LastPingTime - got %v, want %v", got, s.wantLastPingTime)
 	}
 
-	if p.LastPingNonce() != s.wantLastPingNonce {
-		t.Errorf("testPeer: wrong LastPingNonce - got %v, want %v", p.LastPingNonce(), s.wantLastPingNonce)
-		return
+	if got := p.LastPingNonce(); got != s.wantLastPingNonce {
+		t.Fatalf("wrong LastPingNonce - got %v, want %v", got, s.wantLastPingNonce)
 	}
 
-	if p.LastPingMicros() != s.wantLastPingMicros {
-		t.Errorf("testPeer: wrong LastPingMicros - got %v, want %v", p.LastPingMicros(), s.wantLastPingMicros)
-		return
+	if got := p.LastPingMicros(); got != s.wantLastPingMicros {
+		t.Fatalf("wrong LastPingMicros - got %v, want %v", got, s.wantLastPingMicros)
 	}
 
-	if p.VerAckReceived() != s.wantVerAckReceived {
-		t.Errorf("testPeer: wrong VerAckReceived - got %v, want %v", p.VerAckReceived(), s.wantVerAckReceived)
-		return
+	if got := p.ProtocolVersion(); got != s.wantProtocolVersion {
+		t.Fatalf("wrong ProtocolVersion - got %v, want %v", got, s.wantProtocolVersion)
 	}
 
-	if p.VersionKnown() != s.wantVersionKnown {
-		t.Errorf("testPeer: wrong VersionKnown - got %v, want %v", p.VersionKnown(), s.wantVersionKnown)
-		return
-	}
-
-	if p.ProtocolVersion() != s.wantProtocolVersion {
-		t.Errorf("testPeer: wrong ProtocolVersion - got %v, want %v", p.ProtocolVersion(), s.wantProtocolVersion)
-		return
-	}
-
-	if p.LastBlock() != s.wantLastBlock {
-		t.Errorf("testPeer: wrong LastBlock - got %v, want %v", p.LastBlock(), s.wantLastBlock)
-		return
+	if got := p.LastBlock(); got != s.wantLastBlock {
+		t.Fatalf("wrong LastBlock - got %v, want %v", got, s.wantLastBlock)
 	}
 
 	// Allow for a deviation of 1s, as the second may tick when the message is
 	// in transit and the protocol doesn't support any further precision.
-	if p.TimeOffset() != s.wantTimeOffset && p.TimeOffset() != s.wantTimeOffset-1 {
-		t.Errorf("testPeer: wrong TimeOffset - got %v, want %v or %v", p.TimeOffset(),
+	if got := p.TimeOffset(); got != s.wantTimeOffset && got != s.wantTimeOffset-1 {
+		t.Fatalf("wrong TimeOffset - got %v, want %v or %v", got,
 			s.wantTimeOffset, s.wantTimeOffset-1)
-		return
 	}
 
-	if p.BytesSent() != s.wantBytesSent {
-		t.Errorf("testPeer: wrong BytesSent - got %v, want %v", p.BytesSent(), s.wantBytesSent)
-		return
+	if got := p.BytesSent(); got != s.wantBytesSent {
+		t.Fatalf("wrong BytesSent - got %v, want %v", got, s.wantBytesSent)
 	}
 
-	if p.BytesReceived() != s.wantBytesReceived {
-		t.Errorf("testPeer: wrong BytesReceived - got %v, want %v", p.BytesReceived(), s.wantBytesReceived)
-		return
+	if got := p.BytesReceived(); got != s.wantBytesReceived {
+		t.Fatalf("wrong BytesReceived - got %v, want %v", got, s.wantBytesReceived)
 	}
 
-	if p.StartingHeight() != s.wantStartingHeight {
-		t.Errorf("testPeer: wrong StartingHeight - got %v, want %v", p.StartingHeight(), s.wantStartingHeight)
-		return
+	if got := p.StartingHeight(); got != s.wantStartingHeight {
+		t.Fatalf("wrong StartingHeight - got %v, want %v", got, s.wantStartingHeight)
 	}
 
-	if p.Connected() != s.wantConnected {
-		t.Errorf("testPeer: wrong Connected - got %v, want %v", p.Connected(), s.wantConnected)
-		return
+	if got := p.Connected(); got != s.wantConnected {
+		t.Fatalf("wrong Connected - got %v, want %v", got, s.wantConnected)
 	}
 
 	stats := p.StatsSnapshot()
 
-	if p.ID() != stats.ID {
-		t.Errorf("testPeer: wrong ID - got %v, want %v", p.ID(), stats.ID)
-		return
+	if got := p.ID(); got != stats.ID {
+		t.Fatalf("wrong ID - got %v, want %v", got, stats.ID)
 	}
 
-	if p.Addr() != stats.Addr {
-		t.Errorf("testPeer: wrong Addr - got %v, want %v", p.Addr(), stats.Addr)
-		return
+	if got := p.Addr(); got != stats.Addr {
+		t.Fatalf("wrong Addr - got %v, want %v", got, stats.Addr)
 	}
 
-	if p.LastSend() != stats.LastSend {
-		t.Errorf("testPeer: wrong LastSend - got %v, want %v", p.LastSend(), stats.LastSend)
-		return
+	if got := p.LastSend(); got != stats.LastSend {
+		t.Fatalf("wrong LastSend - got %v, want %v", got, stats.LastSend)
 	}
 
-	if p.LastRecv() != stats.LastRecv {
-		t.Errorf("testPeer: wrong LastRecv - got %v, want %v", p.LastRecv(), stats.LastRecv)
-		return
+	if got := p.LastRecv(); got != stats.LastRecv {
+		t.Fatalf("wrong LastRecv - got %v, want %v", got, stats.LastRecv)
 	}
 }
 
-// TestPeerConnection tests connection between inbound and outbound peers.
-func TestPeerConnection(t *testing.T) {
-	var pause sync.Mutex
-	verack := make(chan struct{})
-	peerCfg := &peer.Config{
-		Listeners: peer.MessageListeners{
-			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
-				verack <- struct{}{}
-			},
-			OnWrite: func(p *peer.Peer, bytesWritten int, msg wire.Message,
-				err error) {
-				if _, ok := msg.(*wire.MsgVerAck); ok {
-					verack <- struct{}{}
-				}
-				pause.Lock()
-				pause.Unlock()
-			},
-		},
-		UserAgentName:    "peer",
-		UserAgentVersion: "1.0",
-		ChainParams:      &chaincfg.MainNetParams,
-		Services:         0,
-	}
+// TestPeerHandshake tests the handshake between inbound and outbound peers.
+func TestPeerHandshake(t *testing.T) {
+	peerCfg := mockPeerConfig()
+	peerCfg.Services = 0
 	wantStats := peerStats{
 		wantUserAgent:       wire.DefaultUserAgent + "peer:1.0/",
 		wantServices:        0,
-		wantProtocolVersion: peer.MaxProtocolVersion,
+		wantProtocolVersion: MaxProtocolVersion,
 		wantConnected:       true,
-		wantVersionKnown:    true,
-		wantVerAckReceived:  true,
 		wantLastPingTime:    time.Time{},
 		wantLastPingNonce:   uint64(0),
 		wantLastPingMicros:  int64(0),
@@ -245,331 +273,456 @@ func TestPeerConnection(t *testing.T) {
 	}
 	tests := []struct {
 		name  string
-		setup func() (*peer.Peer, *peer.Peer, error)
-	}{
-		{
-			"basic handshake",
-			func() (*peer.Peer, *peer.Peer, error) {
-				inConn, outConn := pipe(
-					&conn{raddr: "10.0.0.1:8333"},
-					&conn{raddr: "10.0.0.2:8333"},
-				)
-				inPeer := peer.NewInboundPeer(peerCfg)
-				inPeer.AssociateConnection(inConn)
-
-				outPeer, err := peer.NewOutboundPeer(peerCfg, "10.0.0.2:8333")
-				if err != nil {
-					return nil, nil, err
-				}
-				outPeer.AssociateConnection(outConn)
-
-				for i := 0; i < 4; i++ {
-					select {
-					case <-verack:
-					case <-time.After(time.Second):
-						return nil, nil, errors.New("verack timeout")
-					}
-				}
-				return inPeer, outPeer, nil
-			},
+		setup func() (*Peer, *Peer)
+	}{{
+		"basic handshake",
+		func() (*Peer, *Peer) {
+			inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+			inPeer := NewInboundPeer(peerCfg, inConn)
+			outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+			return inPeer, outPeer
 		},
-		{
-			"socks proxy",
-			func() (*peer.Peer, *peer.Peer, error) {
-				inConn, outConn := pipe(
-					&conn{raddr: "10.0.0.1:8333", proxy: true},
-					&conn{raddr: "10.0.0.2:8333"},
-				)
-				inPeer := peer.NewInboundPeer(peerCfg)
-				inPeer.AssociateConnection(inConn)
-
-				outPeer, err := peer.NewOutboundPeer(peerCfg, "10.0.0.2:8333")
-				if err != nil {
-					return nil, nil, err
-				}
-				outPeer.AssociateConnection(outConn)
-
-				for i := 0; i < 4; i++ {
-					select {
-					case <-verack:
-					case <-time.After(time.Second):
-						return nil, nil, errors.New("verack timeout")
-					}
-				}
-				return inPeer, outPeer, nil
-			},
+	}, {
+		"socks proxy",
+		func() (*Peer, *Peer) {
+			inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+			inConn.proxy = true
+			inPeer := NewInboundPeer(peerCfg, inConn)
+			outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+			return inPeer, outPeer
 		},
-	}
+	}}
 	t.Logf("Running %d tests", len(tests))
-	for i, test := range tests {
-		inPeer, outPeer, err := test.setup()
-		if err != nil {
-			t.Errorf("TestPeerConnection setup #%d: unexpected err %v", i, err)
-			return
+	for _, test := range tests {
+		inPeer, outPeer := test.setup()
+		if err := runHandshakes(inPeer, outPeer); err != nil {
+			t.Fatalf("%q: failed to perform handshake: %v", test.name, err)
 		}
+		testPeerState(t, inPeer, wantStats)
+		testPeerState(t, outPeer, wantStats)
+	}
+}
 
-		pause.Lock()
-		testPeer(t, inPeer, wantStats)
-		testPeer(t, outPeer, wantStats)
-		pause.Unlock()
+// TestPeerHandshakeCallback ensures the handshake callback is invoked properly
+// and results in a handshake failure when it returns an error.
+func TestPeerHandshakeCallback(t *testing.T) {
+	peerCfg := &Config{
+		UserAgentName:    "peer",
+		UserAgentVersion: "1.0",
+		Net:              wire.MainNet,
+		Services:         0,
+	}
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	inPeer := NewInboundPeer(peerCfg, inConn)
 
-		inPeer.Disconnect()
-		outPeer.Disconnect()
-		inPeer.WaitForDisconnect()
-		outPeer.WaitForDisconnect()
+	// Ensure the handshake version callback is invoked.
+	inErr := make(chan error, 1)
+	version := make(chan struct{})
+	go func() {
+		ctx := context.Background()
+		err := inPeer.Handshake(ctx, func(msg *wire.MsgVersion) error {
+			close(version)
+			return nil
+		})
+		inErr <- err
+	}()
+	if err := runHandshakes(outPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
+	}
+
+	select {
+	case err := <-inErr:
+		if err != nil {
+			t.Fatalf("failed to perform inPeer handshake: %v", err)
+		}
+	case <-time.After(time.Second * 1):
+		t.Fatal("inPeer handshake error timeout")
+	}
+
+	select {
+	case <-version:
+	case <-time.After(time.Second * 1):
+		t.Fatal("version timeout")
+	}
+
+	// Ensure returning an error from the handshake version callback results in
+	// handshake failure.
+	rejectHandshakeErr := fmt.Errorf("rejected in handshake callback")
+	outPeer = NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	inPeer = NewInboundPeer(peerCfg, inConn)
+	go func() {
+		ctx := context.Background()
+		err := inPeer.Handshake(ctx, func(msg *wire.MsgVersion) error {
+			return rejectHandshakeErr
+		})
+		inErr <- err
+	}()
+	if err := runHandshakes(outPeer); !errors.Is(err, io.EOF) {
+		t.Fatalf("did not receive expected err, got: %v, want: %v", err, io.EOF)
+	}
+
+	select {
+	case err := <-inErr:
+		if !errors.Is(err, rejectHandshakeErr) {
+			t.Fatalf("did not receive expected err, got: %v, want: %v", err,
+				rejectHandshakeErr)
+		}
+	case <-time.After(time.Second * 1):
+		t.Fatal("inPeer handshake error timeout")
 	}
 }
 
 // TestPeerListeners tests that the peer listeners are called as expected.
 func TestPeerListeners(t *testing.T) {
-	verack := make(chan struct{}, 1)
 	ok := make(chan wire.Message, 20)
-	peerCfg := &peer.Config{
-		Listeners: peer.MessageListeners{
-			OnGetAddr: func(p *peer.Peer, msg *wire.MsgGetAddr) {
-				ok <- msg
-			},
-			OnAddr: func(p *peer.Peer, msg *wire.MsgAddr) {
-				ok <- msg
-			},
-			OnPing: func(p *peer.Peer, msg *wire.MsgPing) {
-				ok <- msg
-			},
-			OnPong: func(p *peer.Peer, msg *wire.MsgPong) {
-				ok <- msg
-			},
-			OnAlert: func(p *peer.Peer, msg *wire.MsgAlert) {
-				ok <- msg
-			},
-			OnMemPool: func(p *peer.Peer, msg *wire.MsgMemPool) {
-				ok <- msg
-			},
-			OnTx: func(p *peer.Peer, msg *wire.MsgTx) {
-				ok <- msg
-			},
-			OnBlock: func(p *peer.Peer, msg *wire.MsgBlock, buf []byte) {
-				ok <- msg
-			},
-			OnInv: func(p *peer.Peer, msg *wire.MsgInv) {
-				ok <- msg
-			},
-			OnHeaders: func(p *peer.Peer, msg *wire.MsgHeaders) {
-				ok <- msg
-			},
-			OnNotFound: func(p *peer.Peer, msg *wire.MsgNotFound) {
-				ok <- msg
-			},
-			OnGetData: func(p *peer.Peer, msg *wire.MsgGetData) {
-				ok <- msg
-			},
-			OnGetBlocks: func(p *peer.Peer, msg *wire.MsgGetBlocks) {
-				ok <- msg
-			},
-			OnGetHeaders: func(p *peer.Peer, msg *wire.MsgGetHeaders) {
-				ok <- msg
-			},
-			OnFeeFilter: func(p *peer.Peer, msg *wire.MsgFeeFilter) {
-				ok <- msg
-			},
-			OnFilterAdd: func(p *peer.Peer, msg *wire.MsgFilterAdd) {
-				ok <- msg
-			},
-			OnFilterClear: func(p *peer.Peer, msg *wire.MsgFilterClear) {
-				ok <- msg
-			},
-			OnFilterLoad: func(p *peer.Peer, msg *wire.MsgFilterLoad) {
-				ok <- msg
-			},
-			OnMerkleBlock: func(p *peer.Peer, msg *wire.MsgMerkleBlock) {
-				ok <- msg
-			},
-			OnVersion: func(p *peer.Peer, msg *wire.MsgVersion) {
-				ok <- msg
-			},
-			OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
-				verack <- struct{}{}
-			},
-			OnReject: func(p *peer.Peer, msg *wire.MsgReject) {
-				ok <- msg
-			},
-			OnSendHeaders: func(p *peer.Peer, msg *wire.MsgSendHeaders) {
-				ok <- msg
-			},
+	peerCfg := mockPeerConfig()
+	peerCfg.Listeners = MessageListeners{
+		OnGetAddr: func(p *Peer, msg *wire.MsgGetAddr) {
+			ok <- msg
 		},
-		UserAgentName:    "peer",
-		UserAgentVersion: "1.0",
-		ChainParams:      &chaincfg.MainNetParams,
-		Services:         wire.SFNodeBloom,
-	}
-	inConn, outConn := pipe(
-		&conn{raddr: "10.0.0.1:8333"},
-		&conn{raddr: "10.0.0.2:8333"},
-	)
-	inPeer := peer.NewInboundPeer(peerCfg)
-	inPeer.AssociateConnection(inConn)
-
-	peerCfg.Listeners = peer.MessageListeners{
-		OnVerAck: func(p *peer.Peer, msg *wire.MsgVerAck) {
-			verack <- struct{}{}
+		OnAddr: func(p *Peer, msg *wire.MsgAddr) {
+			ok <- msg
+		},
+		OnAddrV2: func(p *Peer, msg *wire.MsgAddrV2) {
+			ok <- msg
+		},
+		OnPing: func(p *Peer, msg *wire.MsgPing) {
+			ok <- msg
+		},
+		OnPong: func(p *Peer, msg *wire.MsgPong) {
+			ok <- msg
+		},
+		OnMemPool: func(p *Peer, msg *wire.MsgMemPool) {
+			ok <- msg
+		},
+		OnTx: func(p *Peer, msg *wire.MsgTx) {
+			ok <- msg
+		},
+		OnBlock: func(p *Peer, msg *wire.MsgBlock, buf []byte) {
+			ok <- msg
+		},
+		OnInv: func(p *Peer, msg *wire.MsgInv) {
+			ok <- msg
+		},
+		OnHeaders: func(p *Peer, msg *wire.MsgHeaders) {
+			ok <- msg
+		},
+		OnNotFound: func(p *Peer, msg *wire.MsgNotFound) {
+			ok <- msg
+		},
+		OnGetData: func(p *Peer, msg *wire.MsgGetData) {
+			ok <- msg
+		},
+		OnGetBlocks: func(p *Peer, msg *wire.MsgGetBlocks) {
+			ok <- msg
+		},
+		OnGetHeaders: func(p *Peer, msg *wire.MsgGetHeaders) {
+			ok <- msg
+		},
+		OnGetCFilter: func(p *Peer, msg *wire.MsgGetCFilter) {
+			ok <- msg
+		},
+		OnGetCFHeaders: func(p *Peer, msg *wire.MsgGetCFHeaders) {
+			ok <- msg
+		},
+		OnGetCFTypes: func(p *Peer, msg *wire.MsgGetCFTypes) {
+			ok <- msg
+		},
+		OnCFilter: func(p *Peer, msg *wire.MsgCFilter) {
+			ok <- msg
+		},
+		OnCFHeaders: func(p *Peer, msg *wire.MsgCFHeaders) {
+			ok <- msg
+		},
+		OnCFTypes: func(p *Peer, msg *wire.MsgCFTypes) {
+			ok <- msg
+		},
+		OnFeeFilter: func(p *Peer, msg *wire.MsgFeeFilter) {
+			ok <- msg
+		},
+		OnSendHeaders: func(p *Peer, msg *wire.MsgSendHeaders) {
+			ok <- msg
+		},
+		OnGetCFilterV2: func(p *Peer, msg *wire.MsgGetCFilterV2) {
+			ok <- msg
+		},
+		OnCFilterV2: func(p *Peer, msg *wire.MsgCFilterV2) {
+			ok <- msg
+		},
+		OnGetInitState: func(p *Peer, msg *wire.MsgGetInitState) {
+			ok <- msg
+		},
+		OnInitState: func(p *Peer, msg *wire.MsgInitState) {
+			ok <- msg
+		},
+		OnGetCFiltersV2: func(p *Peer, msg *wire.MsgGetCFsV2) {
+			ok <- msg
+		},
+		OnCFiltersV2: func(p *Peer, msg *wire.MsgCFiltersV2) {
+			ok <- msg
 		},
 	}
-	outPeer, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
-	if err != nil {
-		t.Errorf("NewOutboundPeer: unexpected err %v\n", err)
-		return
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	peerCfg.Listeners = MessageListeners{}
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	if err := runHandshakes(inPeer, outPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
 	}
-	outPeer.AssociateConnection(outConn)
+	cancel, wg := runPeersAsync(inPeer, outPeer)
+	defer wg.Wait()
+	defer cancel()
 
-	for i := 0; i < 2; i++ {
-		select {
-		case <-verack:
-		case <-time.After(time.Second * 1):
-			t.Errorf("TestPeerListeners: verack timeout\n")
-			return
-		}
-	}
-
+	const pver = wire.ProtocolVersion
 	tests := []struct {
 		listener string
 		msg      wire.Message
-	}{
-		{
-			"OnGetAddr",
-			wire.NewMsgGetAddr(),
-		},
-		{
-			"OnAddr",
-			wire.NewMsgAddr(),
-		},
-		{
-			"OnPing",
-			wire.NewMsgPing(42),
-		},
-		{
-			"OnPong",
-			wire.NewMsgPong(42),
-		},
-		{
-			"OnAlert",
-			wire.NewMsgAlert([]byte("payload"), []byte("signature")),
-		},
-		{
-			"OnMemPool",
-			wire.NewMsgMemPool(),
-		},
-		{
-			"OnTx",
-			wire.NewMsgTx(),
-		},
-		{
-			"OnBlock",
-			wire.NewMsgBlock(wire.NewBlockHeader(0, &chainhash.Hash{},
-				&chainhash.Hash{}, &chainhash.Hash{}, 1, [6]byte{},
-				1, 1, 1, 1, 1, 1, 1, 1, 1, [32]byte{},
-				binary.LittleEndian.Uint32([]byte{0xb0, 0x1d, 0xfa, 0xce}))),
-		},
-		{
-			"OnInv",
-			wire.NewMsgInv(),
-		},
-		{
-			"OnHeaders",
-			wire.NewMsgHeaders(),
-		},
-		{
-			"OnNotFound",
-			wire.NewMsgNotFound(),
-		},
-		{
-			"OnGetData",
-			wire.NewMsgGetData(),
-		},
-		{
-			"OnGetBlocks",
-			wire.NewMsgGetBlocks(&chainhash.Hash{}),
-		},
-		{
-			"OnGetHeaders",
-			wire.NewMsgGetHeaders(),
-		},
-		{
-			"OnFeeFilter",
-			wire.NewMsgFeeFilter(15000),
-		},
-		{
-			"OnFilterAdd",
-			wire.NewMsgFilterAdd([]byte{0x01}),
-		},
-		{
-			"OnFilterClear",
-			wire.NewMsgFilterClear(),
-		},
-		{
-			"OnFilterLoad",
-			wire.NewMsgFilterLoad([]byte{0x01}, 10, 0, wire.BloomUpdateNone),
-		},
-		{
-			"OnMerkleBlock",
-			wire.NewMsgMerkleBlock(wire.NewBlockHeader(0,
-				&chainhash.Hash{}, &chainhash.Hash{},
-				&chainhash.Hash{}, 1, [6]byte{},
-				1, 1, 1, 1, 1, 1, 1, 1, 1, [32]byte{},
-				binary.LittleEndian.Uint32([]byte{0xb0, 0x1d, 0xfa, 0xce}))),
-		},
+		pver     uint32
+	}{{
+		listener: "OnGetAddr",
+		msg:      wire.NewMsgGetAddr(),
+		pver:     pver,
+	}, {
+		listener: "OnAddr",
+		msg:      wire.NewMsgAddr(),
+		pver:     wire.AddrV2Version - 1,
+	}, {
+		listener: "OnAddrV2",
+		msg: func() *wire.MsgAddrV2 {
+			ipv4Localhost := net.ParseIP("127.0.0.1").To4()
+			addr := wire.NewNetAddressV2(wire.IPv4Address, ipv4Localhost, 8333,
+				time.Now(), wire.SFNodeNetwork)
+			msg := wire.NewMsgAddrV2([]wire.NetAddressV2{addr})
+			return msg
+		}(),
+		pver: pver,
+	}, {
+		listener: "OnPing",
+		msg:      wire.NewMsgPing(42),
+		pver:     pver,
+	}, {
+		listener: "OnPong",
+		msg:      wire.NewMsgPong(42),
+		pver:     pver,
+	}, {
+		listener: "OnMemPool",
+		msg:      wire.NewMsgMemPool(),
+		pver:     pver,
+	}, {
+		listener: "OnTx",
+		msg:      wire.NewMsgTx(),
+		pver:     pver,
+	}, {
+		listener: "OnBlock",
+		msg: wire.NewMsgBlock(wire.NewBlockHeader(0, &chainhash.Hash{},
+			&chainhash.Hash{}, &chainhash.Hash{}, 1, [6]byte{},
+			1, 1, 1, 1, 1, 1, 1, 1, 1, [32]byte{},
+			binary.LittleEndian.Uint32([]byte{0xb0, 0x1d, 0xfa, 0xce}))),
+		pver: pver,
+	}, {
+		listener: "OnInv",
+		msg:      wire.NewMsgInv(),
+		pver:     pver,
+	}, {
+		listener: "OnHeaders",
+		msg:      wire.NewMsgHeaders(),
+		pver:     pver,
+	}, {
+		listener: "OnNotFound",
+		msg:      wire.NewMsgNotFound(),
+		pver:     pver,
+	}, {
+		listener: "OnGetData",
+		msg:      wire.NewMsgGetData(),
+		pver:     pver,
+	}, {
+		listener: "OnGetBlocks",
+		msg:      wire.NewMsgGetBlocks(&chainhash.Hash{}),
+		pver:     pver,
+	}, {
+		listener: "OnGetHeaders",
+		msg:      wire.NewMsgGetHeaders(),
+		pver:     pver,
+	}, {
+		listener: "OnGetCFilter",
+		msg: wire.NewMsgGetCFilter(&chainhash.Hash{},
+			wire.GCSFilterRegular),
+		pver: pver,
+	}, {
+		listener: "OnGetCFHeaders",
+		msg:      wire.NewMsgGetCFHeaders(),
+		pver:     pver,
+	}, {
+		listener: "OnGetCFTypes",
+		msg:      wire.NewMsgGetCFTypes(),
+		pver:     pver,
+	}, {
+		listener: "OnCFilter",
+		msg: wire.NewMsgCFilter(&chainhash.Hash{},
+			wire.GCSFilterRegular, []byte("payload")),
+		pver: pver,
+	}, {
+		listener: "OnCFHeaders",
+		msg:      wire.NewMsgCFHeaders(),
+		pver:     pver,
+	}, {
+		listener: "OnCFTypes",
+		msg: wire.NewMsgCFTypes([]wire.FilterType{
+			wire.GCSFilterRegular, wire.GCSFilterExtended,
+		}),
+		pver: pver,
+	}, {
+		listener: "OnFeeFilter",
+		msg:      wire.NewMsgFeeFilter(15000),
+		pver:     pver,
+	}, {
+		listener: "OnGetCFilterV2",
+		msg:      wire.NewMsgGetCFilterV2(&chainhash.Hash{}),
+		pver:     pver,
+	}, {
+		listener: "OnCFilterV2",
+		msg:      wire.NewMsgCFilterV2(&chainhash.Hash{}, nil, 0, nil),
+		pver:     pver,
+	}, {
 		// only one version message is allowed
 		// only one verack message is allowed
-		{
-			"OnReject",
-			wire.NewMsgReject("block", wire.RejectDuplicate, "dupe block"),
-		},
-		{
-			"OnSendHeaders",
-			wire.NewMsgSendHeaders(),
-		},
-	}
+		listener: "OnSendHeaders",
+		msg:      wire.NewMsgSendHeaders(),
+		pver:     pver,
+	}, {
+		listener: "OnGetInitState",
+		msg:      wire.NewMsgGetInitState(),
+		pver:     pver,
+	}, {
+		listener: "OnInitState",
+		msg:      wire.NewMsgInitState(),
+		pver:     pver,
+	}, {
+		listener: "OnGetCFiltersV2",
+		msg:      wire.NewMsgGetCFsV2(&chainhash.Hash{}, &chainhash.Hash{}),
+		pver:     pver,
+	}, {
+		listener: "OnCFiltersV2",
+		msg:      wire.NewMsgCFiltersV2([]wire.MsgCFilterV2{}),
+		pver:     pver,
+	}}
+
 	t.Logf("Running %d tests", len(tests))
-	for _, test := range tests {
-		// Queue the test message
-		outPeer.QueueMessage(test.msg, nil)
+	prevPver := inPeer.ProtocolVersion()
+	changeProtocolVer := func(pver uint32) {
+		inPeer.flagsMtx.Lock()
+		inPeer.protocolVersion = pver
+		inPeer.flagsMtx.Unlock()
+		outPeer.flagsMtx.Lock()
+		outPeer.protocolVersion = pver
+		outPeer.flagsMtx.Unlock()
+		// The async read might already be blocking with the previous protocol
+		// version.  Send an extra message to guarantee the subsequent reads use
+		// the updated one.
+		outPeer.QueueMessage(wire.NewMsgPing(0), nil)
 		select {
 		case <-ok:
 		case <-time.After(time.Second * 1):
-			t.Errorf("TestPeerListeners: %s timeout", test.listener)
-			return
+			t.Fatal("TestPeerListeners: pver change timeout")
 		}
 	}
-	inPeer.Disconnect()
-	outPeer.Disconnect()
+	for _, test := range tests {
+		if prevPver != test.pver {
+			changeProtocolVer(test.pver)
+			prevPver = test.pver
+		}
+		// Queue the test message
+		outPeer.QueueMessage(test.msg, nil)
+		select {
+		case got := <-ok:
+			if reflect.TypeOf(got) != reflect.TypeOf(test.msg) {
+				t.Fatalf("wrong message type: got %T, want %T", got, test.msg)
+			}
+		case <-time.After(time.Second * 1):
+			t.Fatalf("%s timeout", test.listener)
+		}
+	}
 }
 
-// TestOutboundPeer tests that the outbound peer works as expected.
-func TestOutboundPeer(t *testing.T) {
-	peerCfg := &peer.Config{
-		NewestBlock: func() (*chainhash.Hash, int64, error) {
-			return nil, 0, errors.New("newest block not found")
-		},
-		UserAgentName:    "peer",
-		UserAgentVersion: "1.0",
-		ChainParams:      &chaincfg.MainNetParams,
-		Services:         0,
+// TestOldProtocolVersion ensures that peers with protocol versions older than
+// the minimum required version are disconnected.
+func TestOldProtocolVersion(t *testing.T) {
+	const minVer = wire.RemoveRejectVersion
+	peerCfg := mockPeerConfig()
+	peerCfg.ProtocolVersion = minVer - 1
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	peerCfg.Listeners = MessageListeners{}
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	wantErr := ErrProtocolVerTooOld
+	if err := runHandshakes(inPeer, outPeer); !errors.Is(err, wantErr) {
+		t.Fatalf("unexpected handshake error -- got: %v, want %v", err, wantErr)
 	}
 
-	r, w := io.Pipe()
-	c := &conn{raddr: "10.0.0.1:8333", Writer: w, Reader: r}
-
-	p, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
-	if err != nil {
-		t.Errorf("NewOutboundPeer: unexpected err - %v\n", err)
-		return
+	// Ensure the inbound peer is disconnected.
+	select {
+	case <-inPeer.quit:
+	case <-time.After(time.Second * 1):
+		t.Fatal("inbound peer disconnect timeout")
 	}
 
-	// Test trying to connect twice.
-	p.AssociateConnection(c)
-	p.AssociateConnection(c)
+	// Ensure the outbound peer is disconnected.
+	select {
+	case <-outPeer.quit:
+	case <-time.After(time.Second * 1):
+		t.Fatal("outbound peer disconnect timeout")
+	}
+}
 
+// TestNoNewestBlock ensures peers are disconnected due to an error returned by
+// the caller-provided newest block callback.
+func TestNoNewestBlock(t *testing.T) {
+	// Create a pair of peers that connect to each other using a fake conn such
+	// that the inbound peer has a newest block callback that errors.
+	errNoNewestBlock := errors.New("newest block not found")
+	peerCfg := mockPeerConfig()
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.1:9108")
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	peerCfg.NewestBlock = func() (*chainhash.Hash, int64, error) {
+		return nil, 0, errNoNewestBlock
+	}
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	wantErr := errNoNewestBlock
+	if err := runHandshakes(inPeer, outPeer); !errors.Is(err, wantErr) {
+		t.Fatalf("unexpected handshake error -- got: %v, want %v", err, wantErr)
+	}
+
+	// Ensure the inbound peer disconnects due to the error.
 	disconnected := make(chan struct{})
 	go func() {
-		p.WaitForDisconnect()
+		inPeer.WaitForDisconnect()
+		disconnected <- struct{}{}
+	}()
+
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("peer did not automatically disconnect")
+	}
+
+	if inPeer.Connected() {
+		t.Fatal("inbound peer should not be connected")
+	}
+
+	// Repeat, but in the other direction so the outbound peer has the error.
+	inConn, outConn = pipe("10.0.0.1:9108", "10.0.0.1:9108")
+	outPeer = NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	peerCfg.NewestBlock = nil
+	inPeer = NewInboundPeer(peerCfg, inConn)
+	if err := runHandshakes(inPeer, outPeer); !errors.Is(err, wantErr) {
+		t.Fatalf("unexpected handshake error -- got: %v, want %v", err, wantErr)
+	}
+
+	// Ensure the outbound peer disconnects due to the error.
+	disconnected = make(chan struct{})
+	go func() {
+		outPeer.WaitForDisconnect()
 		disconnected <- struct{}{}
 	}()
 
@@ -577,113 +730,361 @@ func TestOutboundPeer(t *testing.T) {
 	case <-disconnected:
 		close(disconnected)
 	case <-time.After(time.Second):
-		t.Fatal("Peer did not automatically disconnect.")
+		t.Fatal("peer did not automatically disconnect")
 	}
 
-	if p.Connected() {
-		t.Fatalf("Should not be connected as NewestBlock produces error.")
+	if outPeer.Connected() {
+		t.Fatal("outbound peer should not be connected")
 	}
+}
 
-	// Test Queue Inv
-	fakeBlockHash := &chainhash.Hash{0: 0x00, 1: 0x01}
-	fakeInv := wire.NewInvVect(wire.InvTypeBlock, fakeBlockHash)
+// TestDuplicateVersionMsg ensures that receiving a version message after one
+// has already been received results in the peer being disconnected.
+func TestDuplicateVersionMsg(t *testing.T) {
+	// Create a pair of peers that are connected to each other using a fake
+	// connection.
+	peerCfg := mockPeerConfig()
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.1:9108")
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	if err := runHandshakes(inPeer, outPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
+	}
+	cancel, wg := runPeersAsync(inPeer, outPeer)
+	defer wg.Wait()
+	defer cancel()
 
-	// Should be noops as the peer could not connect.
-	p.QueueInventory(fakeInv)
-	p.AddKnownInventory(fakeInv)
-	p.QueueInventory(fakeInv)
-
-	fakeMsg := wire.NewMsgVerAck()
-	p.QueueMessage(fakeMsg, nil)
+	// Queue a duplicate version message from the outbound peer and wait until
+	// it is sent.
 	done := make(chan struct{})
-	p.QueueMessage(fakeMsg, done)
-	<-done
-	p.Disconnect()
+	outPeer.QueueMessage(&wire.MsgVersion{}, done)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("send duplicate version timeout")
+	}
 
-	// Test NewestBlock
-	var newestBlock = func() (*chainhash.Hash, int64, error) {
-		hashStr := "14a0810ac680a3eb3f82edc878cea25ec41d6b790744e5daeef"
-		hash, err := chainhash.NewHashFromStr(hashStr)
-		if err != nil {
-			return nil, 0, err
+	// Ensure the peer that is the recipient of the duplicate version closes the
+	// connection.
+	disconnected := make(chan struct{}, 1)
+	go func() {
+		inPeer.WaitForDisconnect()
+		close(disconnected)
+	}()
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("peer did not disconnect")
+	}
+}
+
+// TestNetFallback ensures the network is set to the expected value in
+// accordance with the parameters.
+func TestNetFallback(t *testing.T) {
+	cfg := Config{
+		NewestBlock: func() (*chainhash.Hash, int64, error) {
+			return nil, 0, errors.New("newest block not found")
+		},
+		UserAgentName:    "peer",
+		UserAgentVersion: "1.0",
+		Services:         0,
+	}
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	defer inConn.Close()
+	defer outConn.Close()
+
+	// Ensure testnet is used when the network is not specified.
+	p := NewInboundPeer(&cfg, inConn)
+	if p.cfg.Net != wire.TestNet3 {
+		t.Fatalf("default network is %v instead of testnet3", p.cfg.Net)
+	}
+
+	// Ensure network is set to the explicitly specified value.
+	cfg.Net = wire.SimNet
+	p = NewInboundPeer(&cfg, inConn)
+	if p.cfg.Net != wire.SimNet {
+		t.Fatalf("explicit network is %v instead of %v", p.cfg.Net, wire.SimNet)
+	}
+}
+
+// TestUpdateLastBlockHeight ensures the last block height is set properly
+// during the initial version negotiation and is only allowed to advance to
+// higher values via the associated update function.
+func TestUpdateLastBlockHeight(t *testing.T) {
+	// Create a pair of peers that are connected to each other using a fake
+	// connection and the remote peer starting at height 100.
+	const remotePeerHeight = 100
+	peerCfg := Config{
+		UserAgentName:    "peer",
+		UserAgentVersion: "1.0",
+		Net:              wire.MainNet,
+		Services:         0,
+	}
+	remotePeerCfg := peerCfg
+	remotePeerCfg.NewestBlock = func() (*chainhash.Hash, int64, error) {
+		return &chainhash.Hash{}, remotePeerHeight, nil
+	}
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	localPeer := NewOutboundPeer(&peerCfg, outConn.RemoteAddr(), outConn)
+	inPeer := NewInboundPeer(&remotePeerCfg, inConn)
+	if err := runHandshakes(localPeer, inPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
+	}
+	cancel, wg := runPeersAsync(localPeer, inPeer)
+	defer wg.Wait()
+	defer cancel()
+
+	// Ensure the latest block height starts at the value reported by the remote
+	// peer via its version message.
+	if height := localPeer.LastBlock(); height != remotePeerHeight {
+		t.Fatalf("wrong starting height - got %d, want %d", height,
+			remotePeerHeight)
+	}
+
+	// Ensure the latest block height is not allowed to go backwards.
+	localPeer.UpdateLastBlockHeight(remotePeerHeight - 1)
+	if height := localPeer.LastBlock(); height != remotePeerHeight {
+		t.Fatalf("height allowed to go backwards - got %d, want %d", height,
+			remotePeerHeight)
+	}
+
+	// Ensure the latest block height is allowed to advance.
+	localPeer.UpdateLastBlockHeight(remotePeerHeight + 1)
+	if height := localPeer.LastBlock(); height != remotePeerHeight+1 {
+		t.Fatalf("height not allowed to advance - got %d, want %d", height,
+			remotePeerHeight+1)
+	}
+}
+
+// TestPushAddrV2Msg ensures that the PushAddrV2Msg returns the expected
+// number of addresses.
+func TestPushAddrV2Msg(t *testing.T) {
+	addr := wire.NewNetAddressV2(wire.IPv4Address, net.ParseIP("192.168.0.1"),
+		8333, time.Now(), wire.SFNodeNetwork)
+
+	tests := []struct {
+		name        string
+		addrs       []wire.NetAddressV2
+		wantSentLen int
+	}{{
+		name:        "nil address list",
+		addrs:       nil,
+		wantSentLen: 0,
+	}, {
+		name:        "empty address list",
+		addrs:       []wire.NetAddressV2{},
+		wantSentLen: 0,
+	}, {
+		name:        "single address",
+		addrs:       []wire.NetAddressV2{addr},
+		wantSentLen: 1,
+	}, {
+		name: "multiple addresses under limit",
+		addrs: func() []wire.NetAddressV2 {
+			addrs := make([]wire.NetAddressV2, 10)
+			for i := range addrs {
+				addrs[i] = addr
+			}
+			return addrs
+		}(),
+		wantSentLen: 10,
+	}, {
+		name: "addresses over MaxAddrPerV2Msg limit",
+		addrs: func() []wire.NetAddressV2 {
+			addrs := make([]wire.NetAddressV2, wire.MaxAddrPerV2Msg+100)
+			for i := range addrs {
+				addrs[i] = addr
+			}
+			return addrs
+		}(),
+		wantSentLen: wire.MaxAddrPerV2Msg,
+	}}
+
+	// Create a mock connection.
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+
+	// Create a peer with the connection.
+	peerCfg := mockPeerConfig()
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	if err := runHandshakes(inPeer, outPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
+	}
+	cancel, wg := runPeersAsync(inPeer, outPeer)
+	defer wg.Wait()
+	defer cancel()
+
+	for _, test := range tests {
+		// Test the PushAddrV2Msg function.
+		sent := outPeer.PushAddrV2Msg(test.addrs)
+
+		// Check the number of addresses sent.
+		if got := len(sent); got != test.wantSentLen {
+			t.Errorf("%s: expected %d addresses sent, got %d", test.name,
+				test.wantSentLen, got)
 		}
-		return hash, 234439, nil
+	}
+}
+
+// sizedMsg implements the wire.Message interface with a configurable serialized
+// size.
+type sizedMsg struct {
+	size int
+}
+
+func (msg *sizedMsg) BtcDecode(io.Reader, uint32) error { return nil }
+func (msg *sizedMsg) BtcEncode(io.Writer, uint32) error { return nil }
+func (msg *sizedMsg) Command() string                   { return "sized" }
+func (msg *sizedMsg) MaxPayloadLength(uint32) uint32    { return uint32(msg.size) }
+func (msg *sizedMsg) SerializeSize() int                { return msg.size }
+
+// TestWriteMessageDeadline ensures the write deadline applied to each outgoing
+// message is the base timeout plus an allowance that is proportional to the
+// total serialized size of the message.
+func TestWriteMessageDeadline(t *testing.T) {
+	tests := []struct {
+		name          string        // test description
+		payloadSize   int           // serialized size of the message payload
+		wantAllowance time.Duration // expected time allowed beyond the base timeout
+	}{{
+		name:          "empty payload",
+		payloadSize:   0,
+		wantAllowance: 0,
+	}, {
+		name:          "one byte below increased allowance",
+		payloadSize:   writeStallBytesPerSec - wire.MessageHeaderSize - 1,
+		wantAllowance: 0,
+	}, {
+		name:          "exactly a full second allowance",
+		payloadSize:   writeStallBytesPerSec - wire.MessageHeaderSize,
+		wantAllowance: time.Second,
+	}, {
+		name:          "exactly a two second allowance",
+		payloadSize:   2*writeStallBytesPerSec - wire.MessageHeaderSize,
+		wantAllowance: 2 * time.Second,
+	}, {
+		name:          "largest possible message (32 MiB)",
+		payloadSize:   wire.MaxMessagePayload - wire.MessageHeaderSize,
+		wantAllowance: 128 * time.Second,
+	}}
+
+	// Create a peer with a mock connection along with a goroutine that discards
+	// everything written to the other end so the writes below do not block.
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	defer inConn.Close()
+	defer outConn.Close()
+	go io.Copy(io.Discard, outConn)
+	p := NewInboundPeer(mockPeerConfig(), inConn)
+
+	// Override the now function so the deadlines are deterministic.
+	mockNow := time.Now()
+	mockNowFn := func() time.Time { return mockNow }
+	p.nowFn = mockNowFn
+
+	for _, test := range tests {
+		msg := &sizedMsg{size: test.payloadSize}
+		if err := p.writeMessage(msg, msgSize(msg)); err != nil {
+			t.Fatalf("%s: unexpected error writing message: %v", test.name, err)
+		}
+
+		got := inConn.writeDeadline
+		want := mockNow.Add(writeStallTimeout + test.wantAllowance)
+		if !got.Equal(want) {
+			t.Fatalf("%s: wrong write deadline - got %v, want %v", test.name, got,
+				want)
+		}
+	}
+}
+
+// TestWriteMessageDeadlineError ensures a failure to set the write deadline on
+// the underlying connection is returned to the caller.
+func TestWriteMessageDeadlineError(t *testing.T) {
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	defer inConn.Close()
+	defer outConn.Close()
+	p := NewInboundPeer(mockPeerConfig(), inConn)
+
+	wantErr := errors.New("set write deadline failed")
+	inConn.setWriteDeadlineErr = wantErr
+
+	got := p.writeMessage(&sizedMsg{}, 0)
+	if !errors.Is(got, wantErr) {
+		t.Fatalf("wrong error - got %v, want %v", got, wantErr)
+	}
+}
+
+// TestQueuedOutputLimit ensures a peer is disconnected when the total bytes
+// queued for it exceeds the allowed limit.
+func TestQueuedOutputLimit(t *testing.T) {
+	// Create a peer with a mock connection.  Note the peer is intentionally not
+	// run so nothing drains the output queue and thus the queued bytes
+	// accumulate.
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	defer inConn.Close()
+	defer outConn.Close()
+	p := NewInboundPeer(mockPeerConfig(), inConn)
+
+	// Queue messages that total exactly the limit and ensure the peer remains
+	// connected.
+	const numMsgs = 4
+	const msgSize = maxQueuedOutputBytes/numMsgs - wire.MessageHeaderSize
+	for i := 0; i < numMsgs; i++ {
+		p.QueueMessage(&sizedMsg{size: msgSize}, nil)
+	}
+	if got := atomic.LoadInt64(&p.bytesQueued); got != maxQueuedOutputBytes {
+		t.Fatalf("wrong bytes queued - got %d, want %d", got,
+			maxQueuedOutputBytes)
+	}
+	if !p.Connected() {
+		t.Fatal("peer disconnected without exceeding queued output limit")
 	}
 
-	peerCfg.NewestBlock = newestBlock
-	r1, w1 := io.Pipe()
-	c1 := &conn{raddr: "10.0.0.1:8333", Writer: w1, Reader: r1}
-	p1, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
-	if err != nil {
-		t.Errorf("NewOutboundPeer: unexpected err - %v\n", err)
-		return
+	// Queue one more message to exceed the limit and ensure the peer is
+	// disconnected and the done channel is signalled.
+	done := make(chan struct{}, 1)
+	p.QueueMessage(&sizedMsg{size: 1}, done)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("done channel not signalled")
 	}
-	p1.AssociateConnection(c1)
+	if p.Connected() {
+		t.Fatal("peer not disconnected after exceeding queued output limit")
+	}
+}
 
-	// Test update latest block
-	latestBlockHash, err := chainhash.NewHashFromStr("1a63f9cdff1752e6375c8c76e543a71d239e1a2e5c6db1aa679")
-	if err != nil {
-		t.Errorf("NewHashFromStr: unexpected err %v\n", err)
-		return
+// TestQueuedOutputBytesDeducted ensures the bytes queued for a peer are
+// deducted once the associated message has been sent.
+func TestQueuedOutputBytesDeducted(t *testing.T) {
+	// Create a pair of peers that are connected to each other using a fake
+	// connection.
+	peerCfg := mockPeerConfig()
+	inConn, outConn := pipe("10.0.0.1:9108", "10.0.0.2:9108")
+	outPeer := NewOutboundPeer(peerCfg, outConn.RemoteAddr(), outConn)
+	inPeer := NewInboundPeer(peerCfg, inConn)
+	if err := runHandshakes(inPeer, outPeer); err != nil {
+		t.Fatalf("failed to perform handshake: %v", err)
 	}
-	p1.UpdateLastAnnouncedBlock(latestBlockHash)
-	p1.UpdateLastBlockHeight(234440)
-	if p1.LastAnnouncedBlock() != latestBlockHash {
-		t.Errorf("LastAnnouncedBlock: wrong block - got %v, want %v",
-			p1.LastAnnouncedBlock(), latestBlockHash)
-		return
-	}
+	cancel, wg := runPeersAsync(inPeer, outPeer)
+	defer wg.Wait()
+	defer cancel()
 
-	// Test Queue Inv after connection
-	p1.QueueInventory(fakeInv)
-	p1.Disconnect()
-
-	// Test testnet
-	peerCfg.ChainParams = &chaincfg.TestNet2Params
-	peerCfg.Services = wire.SFNodeBloom
-	r2, w2 := io.Pipe()
-	c2 := &conn{raddr: "10.0.0.1:8333", Writer: w2, Reader: r2}
-	p2, err := peer.NewOutboundPeer(peerCfg, "10.0.0.1:8333")
-	if err != nil {
-		t.Errorf("NewOutboundPeer: unexpected err - %v\n", err)
-		return
-	}
-	p2.AssociateConnection(c2)
-
-	// Test PushXXX
-	var addrs []*wire.NetAddress
-	for i := 0; i < 5; i++ {
-		na := wire.NetAddress{}
-		addrs = append(addrs, &na)
-	}
-	if _, err := p2.PushAddrMsg(addrs); err != nil {
-		t.Errorf("PushAddrMsg: unexpected err %v\n", err)
-		return
-	}
-	if err := p2.PushGetBlocksMsg(nil, &chainhash.Hash{}); err != nil {
-		t.Errorf("PushGetBlocksMsg: unexpected err %v\n", err)
-		return
-	}
-	if err := p2.PushGetHeadersMsg(nil, &chainhash.Hash{}); err != nil {
-		t.Errorf("PushGetHeadersMsg: unexpected err %v\n", err)
-		return
+	// Queue a message and wait until it has been sent.
+	done := make(chan struct{})
+	outPeer.QueueMessage(wire.NewMsgPing(0), done)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("done channel not signalled")
 	}
 
-	p2.PushRejectMsg("block", wire.RejectMalformed, "malformed", nil, false)
-	p2.PushRejectMsg("block", wire.RejectInvalid, "invalid", nil, false)
-
-	// Test Queue Messages
-	p2.QueueMessage(wire.NewMsgGetAddr(), nil)
-	p2.QueueMessage(wire.NewMsgPing(1), nil)
-	p2.QueueMessage(wire.NewMsgMemPool(), nil)
-	p2.QueueMessage(wire.NewMsgGetData(), nil)
-	p2.QueueMessage(wire.NewMsgGetHeaders(), nil)
-	p2.QueueMessage(wire.NewMsgFeeFilter(20000), nil)
-
-	p2.Disconnect()
+	// Ensure the bytes queued for the message were deducted once it was sent.
+	if got := atomic.LoadInt64(&outPeer.bytesQueued); got != 0 {
+		t.Fatalf("wrong bytes queued - got %d, want 0", got)
+	}
 }
 
 func init() {
 	// Allow self connection when running the tests.
-	peer.TstAllowSelfConns()
+	allowSelfConns = true
 }
